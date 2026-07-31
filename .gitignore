@@ -1,0 +1,19 @@
+# SimpleVox
+.env
+
+# Outputs and intermediate artifacts
+output/
+
+# Keep the input/ folder structure but ignore media placed in it
+input/*
+!input/.gitkeep
+
+# Logs
+*.log
+
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+.venv/
+venv/
