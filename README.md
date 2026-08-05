@@ -4,11 +4,11 @@
 
 The final output is a video file with identical picture quality and a censored soundtrack.
 
-SimpleVox is a deliberately **simplified** version of [Revox](#relationship-to-revox). It drops voice cloning, speaker diarization, and vocal-stem separation. Every replacement word is spoken by the **same** generic, high-quality male neural voice (Microsoft Edge TTS). This makes it:
+SimpleVox uses a **single generic male voice** for every replacement word, powered by Microsoft Edge TTS (free neural TTS). This focused design keeps the tool:
 
-- **Simple** — 4 stages instead of 6, one TTS voice, no model juggling.
+- **Simple** — a streamlined 4-stage pipeline with one TTS voice.
 - **Free** — no API keys, no HuggingFace tokens, no self-hosted servers.
-- **Fast** — skips the expensive Demucs and pyannote stages entirely.
+- **Fast** — transcription runs directly on the source audio with no extra preprocessing.
 
 ```
 video.mkv ──▶ [1. Transcribe] ──▶ words.json      (WhisperX word timestamps)
@@ -23,22 +23,6 @@ video.mkv ──▶ [1. Transcribe] ──▶ words.json      (WhisperX word tim
             [4. Splice + Mux] ──▶ video_censored.mkv
                (censored audio + ORIGINAL video stream, copied losslessly)
 ```
-
-## Relationship to Revox
-
-SimpleVox is a trimmed-down fork of Revox. The following Revox features are
-**intentionally removed**:
-
-| Revox feature | SimpleVox |
-|---|---|
-| Demucs vocal-stem separation | ❌ Removed — transcribe the original audio directly |
-| pyannote speaker diarization | ❌ Removed — no per-character speaker labels |
-| Per-speaker voice cloning (Fish Speech / ElevenLabs / Pocket-TTS) | ❌ Removed — one generic voice for all words |
-| pyttsx3 (Windows SAPI5) fallback | ❌ Removed — edge-tts is the sole provider |
-| GUI | ❌ Removed — CLI only |
-
-What remains is the proven core: WhisperX transcription, the profanity
-dictionary, and the ffmpeg-based audio splice + lossless video mux.
 
 ## Quick Start
 

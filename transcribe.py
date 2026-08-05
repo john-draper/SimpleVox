@@ -4,9 +4,9 @@ Transcribe a video (or audio) file with WhisperX and export word-level
 timestamps to JSON.
 
 SimpleVox does NOT run speaker diarization — every replacement word is spoken
-by the same generic voice, so speaker labels are unnecessary. This makes the
-transcription stage simpler, faster, and free of the HuggingFace token /
-gated-repo requirements that the full revox pipeline needed.
+by the same generic voice, so speaker labels are unnecessary. This keeps the
+transcription stage simple, fast, and free of any HuggingFace token or
+gated-repo requirements.
 
 WhisperX (and ffmpeg underneath it) reads the audio track directly out of any
 common video container (.mkv, .mp4, .m4v, .mov, .avi, .webm, ...), so this stage
