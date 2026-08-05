@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How It Works — SimpleVox</title>
+  <meta name="description" content="A deep dive into SimpleVox's four-stage pipeline: transcription, profanity detection, audio generation, and seamless splicing.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== Navbar ===== -->
+  <header class="navbar" id="navbar">
+    <div class="container">
+      <a href="index.html" class="logo">
+        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="8" fill="#5e5ce6"/>
+          <path d="M9 11v10M9 11c2.5 0 4 1.2 4 3s-1.5 3-4 3M19 21V11l4 4 4-4v10" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        SimpleVox
+      </a>
+      <nav>
+        <a href="index.html">Home</a>
+        <a href="how-it-works.html" class="active">How It Works</a>
+        <a href="setup.html">Setup</a>
+        <a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener" class="github-link">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ===== Page Header ===== -->
+  <div class="page-header">
+    <div class="container">
+      <h1>How It Works</h1>
+      <p>A four-stage pipeline that transforms your video from raw audio to a seamlessly censored final cut.</p>
+    </div>
+  </div>
+
+  <!-- ===== Overview ===== -->
+  <section class="content-section">
+    <div class="container-narrow">
+      <h2>The big picture</h2>
+      <p>SimpleVox processes a video file through four distinct stages. Each stage takes the output of the previous one and passes its result forward — together they form an end-to-end profanity filter that runs entirely on your machine.</p>
+      <div class="code-block" style="margin: 24px 0;"><span class="string">video.mkv</span> ──▶ [<span class="keyword">1. Transcribe</span>] ──▶ words.json
+                    │
+                    ▼
+            [<span class="keyword">2. Find Replacements</span>] ──▶ replacements.json
+                    │
+                    ▼
+            [<span class="keyword">3. Generate Audio</span>] ──▶ *.wav
+                    │
+                    ▼
+            [<span class="keyword">4. Splice + Mux</span>] ──▶ video_censored.mkv
+               <span class="comment">(censored audio + ORIGINAL video stream, copied losslessly)</span></div>
+      <p>When you run <code>python run.py</code>, all four stages execute automatically. But each stage is also a standalone script you can run individually for debugging or experimentation.</p>
+    </div>
+  </section>
+
+  <!-- ===== Stage 1 ===== -->
+  <section class="content-section bg-surface">
+    <div class="container-narrow">
+      <h2>Stage 1 — Transcription</h2>
+      <p><code>transcribe.py</code> uses <a href="https://github.com/m-bain/whisperX" target="_blank" rel="noopener">WhisperX</a> to transcribe the audio track with word-level timestamps. WhisperX is built on OpenAI's Whisper model but adds forced alignment, which dramatically improves the accuracy of per-word start/end times — essential for clean splicing later.</p>
+      <h3>How it works</h3>
+      <ul>
+        <li>ffmpeg extracts the audio track from the video container</li>
+        <li>The Whisper model runs GPU-accelerated (VAD-batched) transcription</li>
+        <li>A phoneme alignment model refines word boundaries to millisecond precision</li>
+        <li>Results are flattened into a simple JSON list: <code>{"word", "start", "end"}</code></li>
+      </ul>
+      <h3>Run it standalone</h3>
+      <div class="code-block"><span class="prompt">$</span> <span class="keyword">python</span> transcribe.py <span class="string">"input/video.mkv"</span> <span class="flag">-o</span> output/words.json</div>
+      <h3>Key options</h3>
+      <ul>
+        <li><code>--model small</code> — Whisper model size (tiny, base, small, medium, large-v3). Bigger = more accurate, slower.</li>
+        <li><code>--device cuda</code> — Force GPU or CPU. Defaults to auto-detect.</li>
+        <li><code>--compute-type float16</code> — Lower precision = faster, less VRAM. Use <code>int8</code> for CPU.</li>
+        <li><code>--language en</code> — Language code, or <code>auto</code> to detect.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ===== Stage 2 ===== -->
+  <section class="content-section">
+    <div class="container-narrow">
+      <h2>Stage 2 — Profanity Detection</h2>
+      <p><code>replacements.py</code> matches each transcribed word against a built-in dictionary of profanity → euphemism mappings. The matching is case-insensitive and ignores surrounding punctuation, so <code>"Damn,"</code> matches the key <code>damn</code>.</p>
+      <h3>The dictionary</h3>
+      <p>The <code>REPLACEMENTS</code> dict is a plain Python dictionary — fully editable. It covers common profanity families (ass, shit, fuck, bitch, damn) with hundreds of inflections, plurals, compounds, and hyphenated variants:</p>
+      <div class="code-block"><span class="comment"># A small sample from replacements.py</span>
+REPLACEMENTS = {
+    <span class="string">"bitch"</span>: <span class="string">"brat"</span>,
+    <span class="string">"bitches"</span>: <span class="string">"brats"</span>,
+    <span class="string">"fuck"</span>: <span class="string">"freak"</span>,
+    <span class="string">"fucking"</span>: <span class="string">"stinking"</span>,
+    <span class="string">"shit"</span>: <span class="string">"crap"</span>,
+    <span class="string">"damn"</span>: <span class="string">"dang"</span>,
+    <span class="comment"># ...hundreds more</span>
+}</div>
+      <h3>Design choices</h3>
+      <p>Euphemisms are chosen to sound <strong>genuinely different</strong> from the original — different vowels, different ending consonants. For example, <code>bitch → brat</code> (not "bench", which sounds too similar). Hyphenated forms like <code>half-assed</code> get their own keys because the matcher preserves internal punctuation.</p>
+      <p><strong>Note:</strong> The matcher checks one word at a time, so multi-word phrases aren't supported yet. Adding phrase matching is a planned enhancement.</p>
+    </div>
+  </section>
+
+  <!-- ===== Stage 3 ===== -->
+  <section class="content-section bg-surface">
+    <div class="container-narrow">
+      <h2>Stage 3 — Audio Generation</h2>
+      <p><code>generate_audio.py</code> generates a <code>.wav</code> file for each replacement word using <a href="https://github.com/rany2/edge-tts" target="_blank" rel="noopener">edge-tts</a> — Microsoft's free neural text-to-speech. Every word is spoken by the same natural-sounding voice, creating consistency across the whole video.</p>
+      <h3>Why one voice?</h3>
+      <p>Using a single generic voice keeps the pipeline simple, free, and fast. There's no voice cloning, no per-speaker models, and no API keys — just clean, high-quality neural TTS that runs in seconds.</p>
+      <h3>Run it standalone</h3>
+      <div class="code-block"><span class="prompt">$</span> <span class="keyword">python</span> generate_audio.py output/movie_replacements.json <span class="flag">--output-dir</span> output/generated_audio</div>
+      <h3>Choosing a voice</h3>
+      <p>The default is <code>en-US-GuyNeural</code>, a conversational US male voice. You can switch with <code>--voice</code>:</p>
+      <table class="voice-table">
+        <thead>
+          <tr><th>Voice ID</th><th>Style</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>en-US-GuyNeural</td><td>Conversational US male (default)</td></tr>
+          <tr><td>en-US-DavisNeural</td><td>Warm US male</td></tr>
+          <tr><td>en-GB-RyanNeural</td><td>British male</td></tr>
+          <tr><td>en-AU-WilliamNeural</td><td>Australian male</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== Stage 4 ===== -->
+  <section class="content-section">
+    <div class="container-narrow">
+      <h2>Stage 4 — Splice & Mux</h2>
+      <p><code>splice_audio.py</code> is the most intricate stage. It builds the final censored audio track by stitching together the original audio with the generated replacements, then muxes it with the untouched video stream.</p>
+      <h3>What it does</h3>
+      <ol>
+        <li>Sorts replacements by start time</li>
+        <li>Extracts each "gap" segment (the original audio between replacement words) with ffmpeg</li>
+        <li>For each replacement:
+          <ul>
+            <li>Time-stretches or trims it to <strong>exactly</strong> match the original word's duration (keeps A/V sync)</li>
+            <li>Loudness-matches it to the original word's volume</li>
+            <li>Applies 20ms fades at boundaries for seamless blending</li>
+          </ul>
+        </li>
+        <li>Concatenates all segments into one censored audio track</li>
+        <li>Muxes the clean audio with the <strong>original video stream</strong> (copied losslessly via <code>-c:v copy</code>)</li>
+      </ol>
+      <h3>The result</h3>
+      <p>A new video file with identical picture quality and a censored soundtrack. The original video stream is never re-encoded — it's copied bit-for-bit. If your player or container has trouble with a stream copy, set <code>VIDEO_REENCODE=1</code> to re-encode the video as a fallback.</p>
+      <h3>Run it standalone</h3>
+      <div class="code-block"><span class="prompt">$</span> <span class="keyword">python</span> splice_audio.py <span class="string">"input/video.mkv"</span> \
+    <span class="flag">--replacements-json</span> output/movie_replacements.json \
+    <span class="flag">--audio-dir</span> output/generated_audio \
+    <span class="flag">--output</span> output/video_censored.mkv</div>
+    </div>
+  </section>
+
+  <!-- ===== CTA ===== -->
+  <section class="cta-section">
+    <div class="container">
+      <h2>Ready to try it?</h2>
+      <p>Follow the setup guide and run your first censored video in minutes.</p>
+      <a href="setup.html" class="btn btn-light">Setup Guide →</a>
+    </div>
+  </section>
+
+  <!-- ===== Footer ===== -->
+  <footer>
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <h5>SimpleVox</h5>
+          <p>An open-source profanity filter for video. Built with WhisperX, Edge TTS, and ffmpeg. Free forever under the MIT license.</p>
+        </div>
+        <div class="footer-col">
+          <h6>Pages</h6>
+          <ul>
+            <li><a href="index.html">Home</a></li>
+            <li><a href="how-it-works.html">How It Works</a></li>
+            <li><a href="setup.html">Setup Guide</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h6>Resources</h6>
+          <ul>
+            <li><a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener">GitHub Repo</a></li>
+            <li><a href="https://github.com/m-bain/whisperX" target="_blank" rel="noopener">WhisperX</a></li>
+            <li><a href="https://github.com/rany2/edge-tts" target="_blank" rel="noopener">edge-tts</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h6>Project</h6>
+          <ul>
+            <li><a href="https://github.com/john-draper/SimpleVox/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+            <li><a href="https://github.com/john-draper/SimpleVox/issues" target="_blank" rel="noopener">Report an Issue</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>Developed by John Draper · Released under the MIT License</span>
+        <span>An open community project</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const navbar = document.getElementById('navbar');
+    window.addEventListener('scroll', () => {
+      navbar.classList.toggle('scrolled', window.scrollY > 10);
+    });
+  </script>
+
+</body>
+</html>

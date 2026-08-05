@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SimpleVox — AI Profanity Filter for Video</title>
+  <meta name="description" content="Automatically detect profanity in video files and replace each word with a clean euphemism spoken by a natural neural voice. Free, open source, and runs locally.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== Navbar ===== -->
+  <header class="navbar" id="navbar">
+    <div class="container">
+      <a href="index.html" class="logo">
+        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="8" fill="#5e5ce6"/>
+          <path d="M9 11v10M9 11c2.5 0 4 1.2 4 3s-1.5 3-4 3M19 21V11l4 4 4-4v10" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        SimpleVox
+      </a>
+      <nav>
+        <a href="index.html" class="active">Home</a>
+        <a href="how-it-works.html">How It Works</a>
+        <a href="setup.html">Setup</a>
+        <a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener" class="github-link">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ===== Hero ===== -->
+  <section class="hero">
+    <div class="hero-glow"></div>
+    <div class="container">
+      <span class="hero-eyebrow">🎬 Free & Open Source · MIT Licensed</span>
+      <h1>Clean audio for your videos,<br>automatically.</h1>
+      <p class="hero-sub">SimpleVox detects profanity in any video file and replaces each word with a natural-sounding euphemism — preserving the original picture quality perfectly.</p>
+      <div class="hero-actions">
+        <a href="setup.html" class="btn btn-primary">
+          Get Started
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener" class="btn btn-secondary">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Pipeline ===== -->
+  <section class="bg-surface">
+    <div class="container">
+      <div class="section-head reveal">
+        <h2>A focused four-stage pipeline.</h2>
+        <p>From raw video to a clean final cut — each stage is purpose-built and runs entirely on your machine.</p>
+      </div>
+      <div class="pipeline">
+        <div class="pipeline-step reveal">
+          <div class="step-icon">🎙️</div>
+          <div class="step-label">Stage 1</div>
+          <h4>Transcribe</h4>
+          <p>WhisperX generates GPU-accelerated word-level timestamps</p>
+        </div>
+        <div class="pipeline-step reveal reveal-delay-1">
+          <div class="step-icon">🔍</div>
+          <div class="step-label">Stage 2</div>
+          <h4>Detect</h4>
+          <p>A customizable dictionary finds words to replace with euphemisms</p>
+        </div>
+        <div class="pipeline-step reveal reveal-delay-2">
+          <div class="step-icon">🗣️</div>
+          <div class="step-label">Stage 3</div>
+          <h4>Generate</h4>
+          <p>Microsoft Edge neural TTS speaks each clean replacement word</p>
+        </div>
+        <div class="pipeline-step reveal reveal-delay-3">
+          <div class="step-icon">✂️</div>
+          <div class="step-label">Stage 4</div>
+          <h4>Splice & Mux</h4>
+          <p>ffmpeg seamlessly merges the clean audio with the original video</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Why SimpleVox ===== -->
+  <section>
+    <div class="container">
+      <div class="section-head reveal">
+        <h2>Built different. Built simple.</h2>
+        <p>Everything you need to clean up a video, nothing you don't.</p>
+      </div>
+      <div class="feature-grid">
+        <div class="feature-card reveal">
+          <div class="icon-wrap">🎯</div>
+          <h3>Word-Level Precision</h3>
+          <p>Forced alignment technology gives accurate per-word timestamps, so only the targeted words get replaced — nothing more.</p>
+        </div>
+        <div class="feature-card reveal reveal-delay-1">
+          <div class="icon-wrap">⚡</div>
+          <h3>GPU Accelerated</h3>
+          <p>WhisperX runs on CUDA GPUs for fast transcription. Batch processing handles entire show folders at once.</p>
+        </div>
+        <div class="feature-card reveal reveal-delay-2">
+          <div class="icon-wrap">🔗</div>
+          <h3>Seamless Splicing</h3>
+          <p>Each replacement is time-stretched, trimmed, and loudness-matched to fit perfectly. No audible gaps or artifacts.</p>
+        </div>
+        <div class="feature-card reveal">
+          <div class="icon-wrap">🎨</div>
+          <h3>Lossless Video</h3>
+          <p>The original video stream is copied bit-for-bit. Only the audio track is edited — picture quality stays identical.</p>
+        </div>
+        <div class="feature-card reveal reveal-delay-1">
+          <div class="icon-wrap">🔧</div>
+          <h3>Fully Customizable</h3>
+          <p>Edit the euphemism dictionary, swap voices, or change Whisper models. Every part of the pipeline is configurable.</p>
+        </div>
+        <div class="feature-card reveal reveal-delay-2">
+          <div class="icon-wrap">💚</div>
+          <h3>100% Open Source</h3>
+          <p>MIT licensed, no subscriptions, no telemetry, no lock-in. Run it locally on your own hardware, forever.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Voices + Privacy Bento ===== -->
+  <section class="bg-surface">
+    <div class="container">
+      <div class="bento">
+        <div class="bento-card reveal">
+          <div class="icon-wrap">🗣️</div>
+          <h3>One clear, natural voice</h3>
+          <p>Every replacement word is spoken by Microsoft Edge neural TTS — a high-quality, conversational male voice that blends in naturally. Prefer a different tone? Choose from US, British, or Australian accents with a single flag.</p>
+        </div>
+        <div class="bento-card reveal reveal-delay-1">
+          <div class="icon-wrap">🔒</div>
+          <h3>Private & local</h3>
+          <p>Your video never leaves your machine. All processing happens locally — no cloud uploads, no data collection, no API keys required.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Quick Start ===== -->
+  <section>
+    <div class="container-narrow">
+      <div class="section-head reveal">
+        <h2>Quick Start.</h2>
+        <p>Up and running in three commands.</p>
+      </div>
+      <div class="reveal">
+        <div class="code-block"><span class="comment"># Clone the repo</span>
+<span class="prompt">$</span> <span class="keyword">git</span> clone https://github.com/john-draper/SimpleVox.git
+<span class="prompt">$</span> <span class="keyword">cd</span> SimpleVox
+
+<span class="comment"># Install dependencies</span>
+<span class="prompt">$</span> pip install -r requirements.txt
+
+<span class="comment"># Drop a video into input/, then run:</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="string">"input/movie.mkv"</span>
+
+<span class="comment"># Result: output/movie.mkv  (censored audio + original video)</span></div>
+      </div>
+      <div style="text-align:center; margin-top:36px;" class="reveal reveal-delay-1">
+        <a href="setup.html" class="btn btn-secondary">Full Setup Guide →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FAQ ===== -->
+  <section class="bg-surface">
+    <div class="container-narrow">
+      <div class="section-head reveal">
+        <h2>Questions?</h2>
+        <p>Everything you might want to know.</p>
+      </div>
+      <div class="faq-list reveal">
+        <details class="faq-item" open>
+          <summary>What video formats are supported?</summary>
+          <p>Any format that ffmpeg can decode: MKV, MP4, M4V, MOV, AVI, WebM, WMV, and FLV. The pipeline outputs the same container format as the input, so it drops right back into your library.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Do I need a GPU?</summary>
+          <p>A CUDA-compatible NVIDIA GPU is strongly recommended — WhisperX transcription is dramatically faster on GPU. The pipeline does fall back to CPU automatically, but expect it to take significantly longer.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Do I need any API keys?</summary>
+          <p>No. SimpleVox uses Microsoft Edge TTS, which is free and requires no authentication. There's no HuggingFace token, no ElevenLabs key, no cloud account — just install and run.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I customize which words get filtered?</summary>
+          <p>Absolutely. The profanity dictionary is a plain Python dict in <code>replacements.py</code> — add or remove mappings, change euphemisms, or tweak hyphenated variants. It's fully editable.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is the video quality affected?</summary>
+          <p>No. The original video stream is <strong>stream-copied losslessly</strong> (<code>-c:v copy</code>). Only the audio track is edited and re-encoded. The output picture is byte-for-byte identical to the source.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can it process a whole folder of videos?</summary>
+          <p>Yes. Pass a folder (or run with no arguments to default to <code>input/</code>) and SimpleVox will process every video recursively, mirroring your folder structure into <code>output/</code>.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== CTA ===== -->
+  <section class="cta-section">
+    <div class="container">
+      <h2>Ready to clean up your library?</h2>
+      <p>Clone the repo, drop in a video, and run your first censored export in minutes.</p>
+      <a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener" class="btn btn-light">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+  </section>
+
+  <!-- ===== Footer ===== -->
+  <footer>
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <h5>SimpleVox</h5>
+          <p>An open-source profanity filter for video. Built with WhisperX, Edge TTS, and ffmpeg. Free forever under the MIT license.</p>
+        </div>
+        <div class="footer-col">
+          <h6>Pages</h6>
+          <ul>
+            <li><a href="index.html">Home</a></li>
+            <li><a href="how-it-works.html">How It Works</a></li>
+            <li><a href="setup.html">Setup Guide</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h6>Resources</h6>
+          <ul>
+            <li><a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener">GitHub Repo</a></li>
+            <li><a href="https://github.com/m-bain/whisperX" target="_blank" rel="noopener">WhisperX</a></li>
+            <li><a href="https://github.com/rany2/edge-tts" target="_blank" rel="noopener">edge-tts</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h6>Project</h6>
+          <ul>
+            <li><a href="https://github.com/john-draper/SimpleVox/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+            <li><a href="https://github.com/john-draper/SimpleVox/issues" target="_blank" rel="noopener">Report an Issue</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>Developed by John Draper · Released under the MIT License</span>
+        <span>An open community project</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Navbar background on scroll
+    const navbar = document.getElementById('navbar');
+    window.addEventListener('scroll', () => {
+      navbar.classList.toggle('scrolled', window.scrollY > 10);
+    });
+
+    // Scroll reveal animations
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+  </script>
+
+</body>
+</html>

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup Guide — SimpleVox</title>
+  <meta name="description" content="Install SimpleVox in minutes. Prerequisites, step-by-step setup, and usage examples for the video profanity filter.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== Navbar ===== -->
+  <header class="navbar" id="navbar">
+    <div class="container">
+      <a href="index.html" class="logo">
+        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="8" fill="#5e5ce6"/>
+          <path d="M9 11v10M9 11c2.5 0 4 1.2 4 3s-1.5 3-4 3M19 21V11l4 4 4-4v10" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        SimpleVox
+      </a>
+      <nav>
+        <a href="index.html">Home</a>
+        <a href="how-it-works.html">How It Works</a>
+        <a href="setup.html" class="active">Setup</a>
+        <a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener" class="github-link">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ===== Page Header ===== -->
+  <div class="page-header">
+    <div class="container">
+      <h1>Setup Guide</h1>
+      <p>Get SimpleVox running on your machine in a few minutes.</p>
+    </div>
+  </div>
+
+  <!-- ===== Prerequisites ===== -->
+  <section class="content-section">
+    <div class="container-narrow">
+      <h2>Prerequisites</h2>
+      <p>Three things to install before you begin:</p>
+      <h3>1. Python 3.10+</h3>
+      <p>Download from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a> or install via your package manager. Make sure Python is on your PATH.</p>
+      <h3>2. ffmpeg</h3>
+      <p>ffmpeg handles audio decoding, splicing, and video muxing. Install it with:</p>
+      <div class="code-block"><span class="comment"># Windows (PowerShell / winget)</span>
+<span class="prompt">$</span> winget install Gyan.FFmpeg
+
+<span class="comment"># macOS (Homebrew)</span>
+<span class="prompt">$</span> brew install ffmpeg
+
+<span class="comment"># Ubuntu / Debian</span>
+<span class="prompt">$</span> sudo apt install ffmpeg</div>
+      <p>After installing, reopen your terminal and run <code>ffmpeg -version</code> to confirm it's on your PATH.</p>
+      <h3>3. NVIDIA GPU (recommended)</h3>
+      <p>A CUDA-compatible NVIDIA GPU makes transcription dramatically faster. SimpleVox falls back to CPU automatically if you don't have one, but it will be much slower for long videos.</p>
+    </div>
+  </section>
+
+  <!-- ===== Installation ===== -->
+  <section class="content-section bg-surface">
+    <div class="container-narrow">
+      <h2>Installation</h2>
+      <h3>Step 1 — Clone the repository</h3>
+      <div class="code-block"><span class="prompt">$</span> <span class="keyword">git</span> clone https://github.com/john-draper/SimpleVox.git
+<span class="prompt">$</span> <span class="keyword">cd</span> SimpleVox</div>
+      <h3>Step 2 — Install PyTorch (GPU only)</h3>
+      <p>For GPU acceleration, install PyTorch matching your CUDA version <em>first</em>, before the other dependencies. The example below is for CUDA 11.8:</p>
+      <div class="code-block"><span class="prompt">$</span> pip install torch torchaudio <span class="flag">--index-url</span> https://download.pytorch.org/whl/cu118</div>
+      <p>For other CUDA versions, see the <a href="https://pytorch.org/get-started/locally/" target="_blank" rel="noopener">PyTorch install guide</a>. If you're running on CPU only, you can skip this step.</p>
+      <h3>Step 3 — Install the remaining dependencies</h3>
+      <div class="code-block"><span class="prompt">$</span> pip install <span class="flag">-r</span> requirements.txt</div>
+      <p>This installs WhisperX, edge-tts, and audio processing libraries. No HuggingFace token or any other API key is required.</p>
+    </div>
+  </section>
+
+  <!-- ===== Usage ===== -->
+  <section class="content-section">
+    <div class="container-narrow">
+      <h2>Usage</h2>
+      <h3>Place your videos</h3>
+      <p>Drop video files into the <code>input/</code> folder. Subfolders are supported — their structure is mirrored into the output directory:</p>
+      <div class="code-block">input/
+├── movie.mkv
+└── Season 1/
+    └── episode 01.mkv</div>
+      <h3>Run the pipeline</h3>
+      <div class="code-block"><span class="comment"># Process the whole input/ folder (recursive):</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py
+
+<span class="comment"># Single file:</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="string">"input/movie.mkv"</span>
+
+<span class="comment"># A whole folder (recursive):</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="string">"input/Season 1"</span>
+
+<span class="comment"># Choose a different generic voice:</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="string">"input/movie.mkv"</span> <span class="flag">--voice</span> en-US-DavisNeural
+
+<span class="comment"># Use a more accurate (slower) Whisper model:</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="string">"input/movie.mkv"</span> <span class="flag">--model</span> large-v3
+
+<span class="comment"># Skip videos that already have an output file:</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="flag">--skip-existing</span>
+
+<span class="comment"># Keep going even if one video fails (batch mode):</span>
+<span class="prompt">$</span> <span class="keyword">python</span> run.py <span class="flag">--continue-on-error</span>
+
+<span class="comment"># Windows launcher (pass-through wrapper):</span>
+<span class="prompt">></span> run.bat
+<span class="prompt">></span> run.bat <span class="string">"input\Season 1"</span></div>
+      <h3>Output</h3>
+      <p>The censored video is saved to <code>output/</code> with the <strong>same filename</strong> as the input and the <strong>same relative folder structure</strong>. Intermediate files (transcription JSON, replacements JSON, generated WAVs) are stored under <code>output/_intermediate/</code>:</p>
+      <div class="code-block">output/
+├── movie.mkv                                  <span class="comment">← censored output</span>
+├── Season 1/
+│   └── episode 01.mkv                          <span class="comment">← censored output</span>
+└── _intermediate/
+    ├── movie.json
+    ├── movie_replacements.json
+    └── Season 1/
+        └── episode 01.json</div>
+      <p>Filenames with spaces, <code>!</code>, <code>&</code>, and other special characters are handled correctly — all discovery happens in Python to avoid shell-quoting issues.</p>
+    </div>
+  </section>
+
+  <!-- ===== Configuration ===== -->
+  <section class="content-section bg-surface">
+    <div class="container-narrow">
+      <h2>Configuration (optional)</h2>
+      <p>SimpleVox works out of the box with no configuration. To tune transcription or muxing behavior, copy <code>.env.example</code> to <code>.env</code> and edit the values:</p>
+      <div class="code-block"><span class="comment"># Windows</span>
+<span class="prompt">></span> copy .env.example .env
+
+<span class="comment"># macOS / Linux</span>
+<span class="prompt">$</span> cp .env.example .env</div>
+      <table class="voice-table">
+        <thead>
+          <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>WHISPER_DEVICE</td><td>cuda</td><td><code>cuda</code> or <code>cpu</code></td></tr>
+          <tr><td>WHISPER_MODEL</td><td>small</td><td>Whisper model size</td></tr>
+          <tr><td>VIDEO_REENCODE</td><td>0</td><td>Set to <code>1</code> to re-encode the video stream (fallback)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== Troubleshooting ===== -->
+  <section class="content-section">
+    <div class="container-narrow">
+      <h2>Troubleshooting</h2>
+      <h3>Audio out of sync</h3>
+      <p>SimpleVox time-stretches each replacement to exactly match the original word's duration. If you still see drift, make sure you're using the latest <code>splice_audio.py</code>.</p>
+      <h3>CUDA crashes / cuDNN errors</h3>
+      <p>Install cuDNN 8 DLLs and copy them to your <code>torch/lib/</code> folder:</p>
+      <div class="code-block"><span class="prompt">$</span> pip install nvidia-cudnn-cu11==8.9.4.25</div>
+      <p>Or fall back to CPU with <code>--device cpu</code>.</p>
+      <h3>FFmpeg not found</h3>
+      <p>Reinstall ffmpeg (see prerequisites above), then <strong>reopen your terminal</strong> so the PATH changes take effect.</p>
+      <h3>edge-tts returns tiny or empty audio</h3>
+      <p>This is usually a transient network issue — just rerun. The generation stage skips already-generated files with <code>--skip-existing</code>, so you won't redo any work.</p>
+    </div>
+  </section>
+
+  <!-- ===== CTA ===== -->
+  <section class="cta-section">
+    <div class="container">
+      <h2>Want the technical details?</h2>
+      <p>Dive into how each stage of the pipeline works under the hood.</p>
+      <a href="how-it-works.html" class="btn btn-light">How It Works →</a>
+    </div>
+  </section>
+
+  <!-- ===== Footer ===== -->
+  <footer>
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <h5>SimpleVox</h5>
+          <p>An open-source profanity filter for video. Built with WhisperX, Edge TTS, and ffmpeg. Free forever under the MIT license.</p>
+        </div>
+        <div class="footer-col">
+          <h6>Pages</h6>
+          <ul>
+            <li><a href="index.html">Home</a></li>
+            <li><a href="how-it-works.html">How It Works</a></li>
+            <li><a href="setup.html">Setup Guide</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h6>Resources</h6>
+          <ul>
+            <li><a href="https://github.com/john-draper/SimpleVox" target="_blank" rel="noopener">GitHub Repo</a></li>
+            <li><a href="https://github.com/m-bain/whisperX" target="_blank" rel="noopener">WhisperX</a></li>
+            <li><a href="https://github.com/rany2/edge-tts" target="_blank" rel="noopener">edge-tts</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h6>Project</h6>
+          <ul>
+            <li><a href="https://github.com/john-draper/SimpleVox/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+            <li><a href="https://github.com/john-draper/SimpleVox/issues" target="_blank" rel="noopener">Report an Issue</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>Developed by John Draper · Released under the MIT License</span>
+        <span>An open community project</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const navbar = document.getElementById('navbar');
+    window.addEventListener('scroll', () => {
+      navbar.classList.toggle('scrolled', window.scrollY > 10);
+    });
+  </script>
+
+</body>
+</html>

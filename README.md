@@ -1,5 +1,7 @@
 # SimpleVox
 
+🌐 **[View the website →](https://john-draper.github.io/SimpleVox/)**
+
 **Simple Vox**ice censor — automatically detect profanity in a video file and replace each profane word with a clean euphemism spoken by a single, generic male voice. The video stream is preserved losslessly; only the audio track is edited and re-written.
 
 The final output is a video file with identical picture quality and a censored soundtrack.
