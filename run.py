@@ -12,9 +12,16 @@ Pipeline (4 stages, no voice cloning, no diarization, no vocal separation):
     4. Splice + Mux  (splice_audio.py)     — censored audio + ORIGINAL video
 
 Usage:
-    python run.py "input/movie.mkv"
+    python run.py                              # process input/ recursively
+    python run.py "input/movie.mkv"            # single file
+    python run.py "input/Season 1"             # whole folder (recursive)
     python run.py "input/movie.mp4" --output-dir output
     python run.py "input/movie.mkv" --voice en-US-DavisNeural
+
+When a directory is given (or no argument), every video file under it is
+processed recursively. The input folder structure is mirrored into the
+output directory and each output keeps its ORIGINAL filename (no suffix is
+appended); intermediate JSON/WAV files live under output/_intermediate/.
 """
 
 import argparse
@@ -192,10 +199,47 @@ def stage4_splice(video: str, replacements_json: str, audio_dir: str, final_outp
 
 
 # --------------------------------------------------------------------------- #
+# Discovery + path helpers
+# --------------------------------------------------------------------------- #
+
+VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".wmv", ".flv"}
+
+
+def discover_videos(path: Path) -> list[Path]:
+    """Return a sorted list of video files at/under `path`.
+
+    - If `path` is a file, return [path] (regardless of extension).
+    - If `path` is a directory, return all video files found recursively.
+    - Otherwise return [].
+    """
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(
+            p for p in path.rglob("*")
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+        )
+    return []
+
+
+def relative_to_root(video_path: Path, input_root: Path) -> Path:
+    """Path of `video_path` relative to `input_root`.
+
+    Falls back to just the filename if `video_path` is not under `input_root`
+    (e.g. when the user passes a file from outside the input directory).
+    """
+    try:
+        return video_path.resolve().relative_to(input_root.resolve())
+    except ValueError:
+        return Path(video_path.name)
+
+
+# --------------------------------------------------------------------------- #
 # Pre-flight checks
 # --------------------------------------------------------------------------- #
 
-def preflight(video: str) -> bool:
+def preflight_global() -> bool:
+    """One-time environment checks (Python, ffmpeg)."""
     banner("PRE-FLIGHT CHECKS")
 
     log("  [check] Python...")
@@ -212,13 +256,93 @@ def preflight(video: str) -> bool:
         log("                          sudo apt install ffmpeg (Linux)")
         return False
     log("          [OK]")
+    return True
 
-    log("  [check] Input file...")
-    if not Path(video).is_file():
-        log(f"          [FAILED] Input file not found: {video}")
+
+# --------------------------------------------------------------------------- #
+# Per-file pipeline
+# --------------------------------------------------------------------------- #
+
+def process_file(
+    video_path: Path,
+    input_root: Path,
+    output_dir: Path,
+    voice: str,
+    model: str,
+    device: str | None,
+    skip_existing: bool,
+) -> bool:
+    """Run the full 4-stage pipeline on a single video file.
+
+    Folder structure under `input_root` is mirrored into `output_dir`, and the
+    output video keeps its ORIGINAL filename (no `_censored` suffix). All
+    intermediate JSON/WAV files are isolated under
+    `output_dir/_intermediate/<mirrored subpath>/`.
+    """
+    rel = relative_to_root(video_path, input_root)
+    # Output video mirrors the input subpath and keeps the same filename.
+    final_output = output_dir / rel
+    # Intermediates live under a dedicated, clearly-named subfolder.
+    intermediate_dir = output_dir / "_intermediate" / rel.parent
+
+    words_json = str(intermediate_dir / f"{video_path.stem}.json")
+    replacements_json = str(intermediate_dir / f"{video_path.stem}_replacements.json")
+    audio_dir = str(intermediate_dir / "generated_audio")
+
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+    if skip_existing and final_output.is_file():
+        log(f"  [skip-existing] {final_output} already exists; skipping.")
+        return True
+
+    if not video_path.is_file():
+        log(f"  [FAILED] Input file not found: {video_path}")
         return False
-    log(f"          [OK] {video}")
 
+    # --- Config summary ---
+    banner(f"PROCESSING: {rel}")
+    log(f"  Input file:    {video_path}")
+    log(f"  Output folder: {final_output.parent}")
+    log(f"  Voice:         {voice}")
+    log(f"  Whisper model: {model}")
+    log(f"  Output file:   {final_output}")
+    log()
+    log(f"  Stage 1 -> {words_json}")
+    log(f"  Stage 2 -> {replacements_json}")
+    log(f"  Stage 3 -> {audio_dir}/*.wav")
+    log(f"  Stage 4 -> {final_output}")
+
+    # --- Stage 1: Transcription ---
+    if not stage1_transcribe(str(video_path), words_json, model, device):
+        return False
+
+    # --- Stage 2: Profanity filtering ---
+    ok, count = stage2_filter(words_json, replacements_json)
+    if not ok:
+        return False
+
+    if count == 0:
+        banner("[INFO] NO PROFANITY DETECTED")
+        log("  No replacements needed. Copying original to output.")
+        shutil.copy2(video_path, final_output)
+        log(f"  [OK] Final output: {final_output}")
+        return True
+
+    # --- Stage 3: Audio generation (single generic voice) ---
+    if not stage3_generate(replacements_json, audio_dir, voice):
+        return False
+
+    # --- Stage 4: Splicing (into the ORIGINAL video) ---
+    if not stage4_splice(str(video_path), replacements_json, audio_dir, str(final_output)):
+        return False
+
+    # --- Success ---
+    log(f"\n  [OK] Final output: {final_output}")
+    log("  Intermediate files:")
+    log(f"    Transcription JSON:  {words_json}")
+    log(f"    Replacements JSON:   {replacements_json}")
+    log(f"    Generated .wav dir:  {audio_dir}")
     return True
 
 
@@ -228,16 +352,27 @@ def preflight(video: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="SimpleVox: censor profanity in a video with a single generic voice.",
+        description="SimpleVox: censor profanity in videos with a single generic voice. "
+                    "Accepts a file, a directory (processed recursively), or nothing "
+                    "(defaults to the input/ folder, processed recursively).",
     )
     p.add_argument(
-        "video",
-        help="Path to the input video file (e.g. input/movie.mkv)",
+        "input",
+        nargs="?",
+        default=None,
+        help="Path to a single video file OR a directory to process recursively. "
+             "If omitted, the --input-dir folder (default: input) is used.",
+    )
+    p.add_argument(
+        "--input-dir",
+        default="input",
+        help="Root input folder (default: input). Used to mirror the folder "
+             "structure into the output directory.",
     )
     p.add_argument(
         "--output-dir",
         default="output",
-        help="Directory for all outputs (default: output)",
+        help="Directory for all outputs (default: output).",
     )
     p.add_argument(
         "--voice",
@@ -255,76 +390,81 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Device for WhisperX (cuda/cpu). Default: auto-detect.",
     )
+    p.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip videos whose output file already exists.",
+    )
+    p.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue processing remaining videos if one fails (batch mode).",
+    )
     args = p.parse_args(argv)
 
-    video = args.video
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    basename = Path(video).stem
-
-    # Keep the same video container extension for the output.
-    input_ext = Path(video).suffix.lower()
-    video_exts = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".wmv", ".flv"}
-    out_ext = input_ext if input_ext in video_exts else ".mkv"
-
-    words_json = str(output_dir / f"{basename}.json")
-    replacements_json = str(output_dir / f"{basename}_replacements.json")
-    audio_dir = str(output_dir / "generated_audio")
-    final_output = str(output_dir / f"{basename}_censored{out_ext}")
-
-    if not preflight(video):
+    if not preflight_global():
         banner("[FAILED] PRE-FLIGHT CHECKS FAILED")
         return 1
 
-    # --- Config summary ---
-    banner("PIPELINE CONFIGURATION")
-    log(f"  Input file:    {video}")
-    log(f"  Base name:     {basename}")
-    log(f"  Output folder: {output_dir}")
-    log(f"  Voice:         {args.voice}")
-    log(f"  Whisper model: {args.model}")
-    log(f"  Output file:   {final_output}")
-    log()
-    log(f"  Stage 1 -> {words_json}")
-    log(f"  Stage 2 -> {replacements_json}")
-    log(f"  Stage 3 -> {audio_dir}/*.wav")
-    log(f"  Stage 4 -> {final_output}")
+    input_root = Path(args.input_dir).resolve()
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Stage 1: Transcription ---
-    if not stage1_transcribe(video, words_json, args.model, args.device):
+    # Decide what to process: explicit arg, else the whole input folder.
+    target = Path(args.input).resolve() if args.input else input_root
+    if args.input and not target.exists():
+        log(f"[FAILED] Input path does not exist: {target}")
+        return 1
+    if not args.input and not input_root.exists():
+        log(f"[FAILED] Input folder does not exist: {input_root}")
         return 1
 
-    # --- Stage 2: Profanity filtering ---
-    ok, count = stage2_filter(words_json, replacements_json)
-    if not ok:
+    videos = discover_videos(target)
+    if not videos:
+        log(f"[FAILED] No video files found at/under: {target}")
         return 1
 
-    if count == 0:
-        banner("[INFO] NO PROFANITY DETECTED")
-        log("  No replacements needed. Copying original to output.")
-        shutil.copy2(video, final_output)
-        banner("[SUCCESS] PIPELINE COMPLETE")
-        log(f"  Final output: {final_output}")
-        return 0
+    banner("PIPELINE BATCH")
+    log(f"  Input root:  {input_root}")
+    log(f"  Output dir:  {output_dir}")
+    log(f"  Videos:      {len(videos)}")
+    for v in videos:
+        log(f"    - {relative_to_root(v, input_root)}")
+    log(f"  Voice:       {args.voice}")
+    log(f"  Whisper:     {args.model}")
+    log(f"  Skip existing: {'yes' if args.skip_existing else 'no'}")
+    log(f"  Continue on error: {'yes' if args.continue_on_error else 'no'}")
 
-    # --- Stage 3: Audio generation (single generic voice) ---
-    if not stage3_generate(replacements_json, audio_dir, args.voice):
-        return 1
+    failures = 0
+    for idx, video_path in enumerate(videos, start=1):
+        banner(f"[{idx}/{len(videos)}] {relative_to_root(video_path, input_root)}")
+        try:
+            ok = process_file(
+                video_path=video_path,
+                input_root=input_root,
+                output_dir=output_dir,
+                voice=args.voice,
+                model=args.model,
+                device=args.device,
+                skip_existing=args.skip_existing,
+            )
+        except Exception as exc:
+            log(f"[FAILED] Unexpected error on {video_path}: "
+                f"{type(exc).__name__}: {exc}")
+            ok = False
 
-    # --- Stage 4: Splicing (into the ORIGINAL video) ---
-    if not stage4_splice(video, replacements_json, audio_dir, final_output):
-        return 1
+        if not ok:
+            failures += 1
+            if not args.continue_on_error and len(videos) > 1:
+                log("[STOP] A video failed and --continue-on-error was not set; "
+                    "aborting remaining files.")
+                break
 
-    # --- Success ---
-    banner("[SUCCESS] PIPELINE COMPLETE")
-    log(f"  Final censored video: {final_output}")
-    log()
-    log("  Intermediate files:")
-    log(f"    Transcription JSON:  {words_json}")
-    log(f"    Replacements JSON:   {replacements_json}")
-    log(f"    Generated .wav dir:  {audio_dir}")
-    return 0
+    banner("BATCH SUMMARY")
+    log(f"  Processed: {len(videos) - failures} succeeded, {failures} failed "
+        f"(of {len(videos)} total)")
+    log(f"  Outputs written under: {output_dir}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

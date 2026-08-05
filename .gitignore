@@ -1,6 +1,9 @@
 # SimpleVox
 .env
 
+# Internal handoff notes (Cline session context, not project docs)
+handoff.md
+
 # Outputs and intermediate artifacts
 output/
 

@@ -6,12 +6,16 @@ REM  run.bat — SimpleVox launcher
 REM ============================================================================
 REM
 REM  Usage:
-REM      run.bat "path\to\video.mkv"
+REM      run.bat                         (process input\ recursively)
+REM      run.bat "path\to\video.mkv"     (single file)
+REM      run.bat "path\to\folder"        (whole folder, recursive)
+REM      run.bat "input\movie.mkv" --voice en-US-DavisNeural
 REM
-REM  If no argument is given, processes all video files in input\ folder.
-REM
-REM  This batch file is a thin wrapper around run.py (Python) which handles
-REM  all filenames correctly, including those with special characters like &.
+REM  This batch file is a thin wrapper around run.py (Python), which handles
+REM  ALL of the following correctly:
+REM    - filenames with spaces, &, !, %, and other special characters
+REM    - recursive folder discovery (files in subfolders of input\)
+REM    - mirroring the input folder structure into output\
 REM
 REM  Prerequisites:
 REM      1.  Python 3.10+ on PATH
@@ -40,30 +44,10 @@ if errorlevel 1 (
 )
 
 REM --- Run the pipeline ---
-if "%~1"=="" (
-    echo.
-    echo   No input file specified. Processing all videos in input\ folder...
-    echo.
-    setlocal enabledelayedexpansion
-    set "ANY=0"
-    for %%E in (mkv mp4 m4v mov avi webm wmv flv) do (
-        if exist "input\*.%%E" (
-            for %%F in ("input\*.%%E") do (
-                echo   -- Processing: %%F
-                python run.py "%%F"
-                if errorlevel 1 goto :error
-                set "ANY=1"
-            )
-        )
-    )
-    if "!ANY!"=="0" (
-        echo   No video files found in input\.
-        goto :error
-    )
-    endlocal
-) else (
-    python run.py "%~1"
-)
+REM  Deliberately do NOT use `for` loops or delayed expansion here: CMD's
+REM  `!` handling mangles filenames like "American Dad! S17E11.mkv".
+REM  run.py does all discovery and handles special characters safely.
+python run.py %*
 
 if errorlevel 1 goto :error
 

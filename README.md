@@ -74,17 +74,27 @@ cp .env.example .env          (macOS/Linux)
 
 ### Place Your Videos
 
-Drop video files into the `input/` folder:
+Drop video files into the `input/` folder. Subfolders are supported and their
+structure is **mirrored** into the output directory:
 
 ```
-input/movie.mkv
+input/
+├── movie.mkv
+└── Season 1/
+    └── episode 01.mkv
 ```
 
 ### Run
 
 ```bash
+# Process the whole input/ folder (recursive):
+python run.py
+
 # Single file:
 python run.py "input/movie.mkv"
+
+# A whole folder (recursive):
+python run.py "input/Season 1"
 
 # Choose a different generic voice:
 python run.py "input/movie.mkv" --voice en-US-DavisNeural
@@ -92,11 +102,38 @@ python run.py "input/movie.mkv" --voice en-US-DavisNeural
 # Use a more accurate (slower) Whisper model:
 python run.py "input/movie.mkv" --model large-v3
 
-# Windows launcher (processes input/ if no argument given):
-run.bat "input\movie.mkv"
+# Skip videos that already have an output file:
+python run.py --skip-existing
+
+# Keep going even if one video fails (batch mode):
+python run.py --continue-on-error
+
+# Windows launcher (any of the above work; pass-through):
+run.bat
+run.bat "input\Season 1"
+run.bat "input\American Dad! S17E11.mkv" --voice en-US-DavisNeural
 ```
 
-The censored video is saved to `output/` — same video quality, censored audio.
+The censored video is saved to `output/` with the **same filename** as the
+input and the **same relative folder structure**. Intermediate files
+(transcription JSON, replacements JSON, generated WAVs) are stored under
+`output/_intermediate/<same subpath>/`.
+
+```
+output/
+├── movie.mkv                                  ← censored output
+├── Season 1/
+│   └── episode 01.mkv                          ← censored output
+└── _intermediate/
+    ├── movie.json
+    ├── movie_replacements.json
+    └── Season 1/
+        └── episode 01.json
+```
+
+> **Note on special characters:** Filenames containing spaces, `!`, `&`, and
+> other special characters (e.g. `American Dad! S17E11.mkv`) are handled
+> correctly. All discovery happens in Python to avoid shell-quoting pitfalls.
 
 ---
 
