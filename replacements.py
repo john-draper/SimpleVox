@@ -113,6 +113,7 @@ REPLACEMENTS: dict[str, str] = {
     # --- Bitch / cunt / twat family ---
     # NOTE: "bitch" -> "brat" (previously "bench", which sounded too similar).
     "bitch": "brat",
+    "bitches": "brats",
     "cunt": "expletive",
     "twat": "dumbo",
     "twats": "dumbos",
