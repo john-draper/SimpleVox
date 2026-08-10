@@ -53,6 +53,7 @@ REPLACEMENTS: dict[str, str] = {
     "jackass": "jerk",
     "jackasses": "jerks",
     "kickass": "kickbutt",
+    "kick-ass": "kickbutt",
     "smartass": "smarty",
     "smartasses": "smarties",
     # Hyphenated compounds (clean_word() preserves internal punctuation)
