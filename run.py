@@ -60,6 +60,10 @@ def load_dotenv(path: str = ".env") -> None:
 load_dotenv()
 
 
+# Lead-in pad is now per-family (auto) by default — see splice_audio.py's
+# get_word_lead_in_ms(). No import needed; we pass None to use auto mode.
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -168,21 +172,28 @@ def stage3_generate(replacements_json: str, audio_dir: str, voice: str) -> bool:
     return True
 
 
-def stage4_splice(video: str, replacements_json: str, audio_dir: str, final_output: str) -> bool:
+def stage4_splice(video: str, replacements_json: str, audio_dir: str, final_output: str,
+                  lead_in_ms: int | None = None) -> bool:
     banner("[STAGE 4/4] AUDIO SPLICING / VIDEO MUX")
     log(f"  Original:     {video}")
     log(f"  Replacements: {replacements_json}")
     log(f"  WAV dir:      {audio_dir}")
     log(f"  Output:       {final_output}")
-    log(f"  (Video stream is copied losslessly; only audio is censored.)")
+    lead_desc = (f"{lead_in_ms}ms (all words)" if lead_in_ms is not None
+                 else "per-family auto (50ms ass/shit, 0ms others)")
+    log(f"  Lead-in pad:  {lead_desc}")
+    log(f"  (Only the audio is censored; video stream, if any, is copied losslessly.)")
     try:
         from splice_audio import main as splice_main
-        rc = splice_main([
+        cli_args = [
             video,
             "--replacements-json", replacements_json,
             "--audio-dir", audio_dir,
             "--output", final_output,
-        ])
+        ]
+        if lead_in_ms is not None:
+            cli_args += ["--lead-in-ms", str(lead_in_ms)]
+        rc = splice_main(cli_args)
     except SystemExit as exc:
         rc = int(exc.code) if exc.code is not None else 1
     except Exception as exc:
@@ -203,13 +214,15 @@ def stage4_splice(video: str, replacements_json: str, audio_dir: str, final_outp
 # --------------------------------------------------------------------------- #
 
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".wmv", ".flv"}
+AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".m4b", ".flac", ".ogg", ".aac"}
+MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
 
 
 def discover_videos(path: Path) -> list[Path]:
-    """Return a sorted list of video files at/under `path`.
+    """Return a sorted list of media files (video or audio) at/under `path`.
 
     - If `path` is a file, return [path] (regardless of extension).
-    - If `path` is a directory, return all video files found recursively.
+    - If `path` is a directory, return all video/audio files found recursively.
     - Otherwise return [].
     """
     if path.is_file():
@@ -217,7 +230,7 @@ def discover_videos(path: Path) -> list[Path]:
     if path.is_dir():
         return sorted(
             p for p in path.rglob("*")
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+            if p.is_file() and p.suffix.lower() in MEDIA_EXTS
         )
     return []
 
@@ -271,6 +284,7 @@ def process_file(
     model: str,
     device: str | None,
     skip_existing: bool,
+    lead_in_ms: int | None = None,
 ) -> bool:
     """Run the full 4-stage pipeline on a single video file.
 
@@ -334,7 +348,8 @@ def process_file(
         return False
 
     # --- Stage 4: Splicing (into the ORIGINAL video) ---
-    if not stage4_splice(str(video_path), replacements_json, audio_dir, str(final_output)):
+    if not stage4_splice(str(video_path), replacements_json, audio_dir, str(final_output),
+                         lead_in_ms=lead_in_ms):
         return False
 
     # --- Success ---
@@ -352,7 +367,7 @@ def process_file(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="SimpleVox: censor profanity in videos with a single generic voice. "
+        description="SimpleVox: censor profanity in videos/audio with a single generic voice. "
                     "Accepts a file, a directory (processed recursively), or nothing "
                     "(defaults to the input/ folder, processed recursively).",
     )
@@ -360,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
         "input",
         nargs="?",
         default=None,
-        help="Path to a single video file OR a directory to process recursively. "
+        help="Path to a single video/audio file OR a directory to process recursively. "
              "If omitted, the --input-dir folder (default: input) is used.",
     )
     p.add_argument(
@@ -400,6 +415,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Continue processing remaining videos if one fails (batch mode).",
     )
+    p.add_argument(
+        "--lead-in-ms",
+        type=int,
+        default=None,
+        help=("Silence (ms) inserted before each replacement to mute the leaked "
+              "onset of the original word. Default: per-family auto (50ms for "
+              "ass/shit words, 0ms for god/fuck/damn — WhisperX timestamps stop-"
+              "consonant words correctly). Pass 0 to disable all lead-in, or a "
+              "specific value to override all words."),
+    )
     args = p.parse_args(argv)
 
     if not preflight_global():
@@ -434,6 +459,9 @@ def main(argv: list[str] | None = None) -> int:
     log(f"  Whisper:     {args.model}")
     log(f"  Skip existing: {'yes' if args.skip_existing else 'no'}")
     log(f"  Continue on error: {'yes' if args.continue_on_error else 'no'}")
+    lead_desc = (f"{args.lead_in_ms}ms (all words)" if args.lead_in_ms is not None
+                 else "per-family auto")
+    log(f"  Lead-in pad:   {lead_desc}")
 
     failures = 0
     for idx, video_path in enumerate(videos, start=1):
@@ -447,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 device=args.device,
                 skip_existing=args.skip_existing,
+                lead_in_ms=args.lead_in_ms,
             )
         except Exception as exc:
             log(f"[FAILED] Unexpected error on {video_path}: "

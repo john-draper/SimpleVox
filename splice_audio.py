@@ -44,6 +44,64 @@ DEFAULT_GAIN_DB = 6.0  # fallback boost when measurement fails (TTS is typically
 MAX_GAIN_DB = 24.0  # safety clamp to prevent excessive amplification
 MIN_GAIN_DB = -12.0  # safety clamp to prevent excessive attenuation
 
+# --------------------------------------------------------------------------- #
+# Per-family lead-in silence (ms)
+# --------------------------------------------------------------------------- #
+# WhisperX forced-alignment reports the START of some words LATE: the real
+# acoustic onset sits before the reported `start`, leaking into the preceding
+# gap. Without a lead-in you hear "shhcrap" / "aabut" instead of "crap" / "butt".
+#
+# The leak depends on the word's FIRST SOUND:
+#   - Fricatives ("sh" in shit): the frication begins ~50ms before the reported
+#     start (confirmed by acoustic analysis — the "sh" energy is clearly visible
+#     at -50ms in the waveform, 27dB above the noise floor).
+#   - Vowels ("a" in ass): the vowel onset / glottalization begins ~50ms before
+#     the reported start (confirmed by gap-before cross-check: ass gap-before is
+#     50ms longer than the god/fuck baseline, which controls for intrinsic word-
+#     length differences).
+#   - Stop consonants (god, fuck, damn): crisp, abrupt onsets that align with
+#     the timestamp — NO leak (validated by acoustic measurement: median leak
+#     = 0ms at all tested thresholds).
+#
+# Calibration data (Family Guy S01-S22, 417 episodes, ~4000 profane-word
+# occurrences): see _analyze_durations.py and _analyze_onset.py.
+#
+#   Method              ASS leak   SHIT leak   GOD (baseline)   FUCK (baseline)
+#   ------------------- --------   ---------   --------------   ---------------
+#   Duration vs 280ms    100ms*     19ms        300ms ✓           260ms ✓
+#   Gap-before excess     50ms     20.5ms       60ms ✓            120ms ✓
+#   Acoustic onset         — **     22ms        0ms ✓             0ms ✓
+#   Debug envelope          —       ~50ms       onset@0ms ✓       onset@0ms ✓
+#
+#   *  confounded by intrinsic word-length (ass has no stop consonants)
+#   ** unreliable for vowels (gradual onset, no sharp attack)
+#
+# Final calibrated values: 50ms for both A and S families.
+WORD_FAMILY_LEAD_IN_MS = {
+    "a": 50,  # ass, asshole, asses, ... (vowel onset leaks ~50ms)
+    "s": 50,  # shit, shithead, shits, ... (fricative "sh" leaks ~50ms)
+}
+
+
+def get_word_lead_in_ms(word: str) -> int:
+    """Return the calibrated lead-in (ms) for a profane word based on its
+    first sound.
+
+    Vowel-initial ('a') and fricative-initial ('s'/'sh') words get a 50ms
+    lead-in to cover their leaked onset. Stop-initial words (god, fuck, damn,
+    etc.) get 0 — WhisperX timestamps them correctly.
+
+    This is keyed on the first letter of the cleaned word, which correctly
+    handles compounds: "bullshit" starts with 'b' (no pad), "asshole" starts
+    with 'a' (padded), "shithead" starts with 's' (padded).
+    """
+    import string
+
+    cleaned = word.strip().strip(string.punctuation).lower()
+    if not cleaned:
+        return 0
+    return WORD_FAMILY_LEAD_IN_MS.get(cleaned[0], 0)
+
 
 def log(msg: str) -> None:
     print(msg, flush=True)
@@ -220,6 +278,38 @@ def extract_segment(
         )
 
 
+def generate_silence(
+    duration_ms: int,
+    output_path: str,
+    sample_rate: int,
+    channels: int,
+) -> None:
+    """Generate a silent PCM WAV segment of the given duration (ms).
+
+    Used to pad a lead-in before a replacement so the leaked onset of the
+    original profane word (which WhisperX timestamps late) is muted instead of
+    bleeding into the output.
+    """
+    if duration_ms <= 0:
+        raise ValueError(f"Invalid silence duration: {duration_ms}ms")
+    layout = "stereo" if channels == 2 else "mono"
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"anullsrc=channel_layout={layout}:sample_rate={sample_rate}",
+        "-t", f"{duration_ms / 1000:.6f}",
+        "-acodec", "pcm_s16le",
+        "-ar", str(sample_rate),
+        "-ac", str(channels),
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, result.stdout, result.stderr
+        )
+
+
 def convert_replacement_wav(
     input_wav: str,
     output_wav: str,
@@ -324,8 +414,19 @@ def build_censored_audio(
     sample_rate: int,
     channels: int,
     crossfade_ms: int,
+    lead_in_ms: int | None = None,
 ) -> tuple[bool, int, int]:
     """Concatenate gaps + replacement audio into a single censored WAV.
+
+    Lead-in silence is inserted before each replacement to mute the leaked
+    onset of the original profane word (WhisperX timestamps the start of
+    fricative/vowel-initial words late). The amount is determined per word:
+      - If lead_in_ms is an int, it overrides ALL words (manual mode).
+      - If lead_in_ms is None (default), each word uses its calibrated family
+        value from get_word_lead_in_ms() (50ms for ass/shit, 0ms for
+        god/fuck/damn).
+
+    The lead-in is clamped so it never overlaps the previous replacement or 0.
 
     Returns (success, success_count, skipped_count).
     """
@@ -356,15 +457,23 @@ def build_censored_audio(
             skipped_count += 1
             continue
 
+        # --- Lead-in pad -----------------------------------------------------
+        # Extend the censored region backward by up to the word's lead-in
+        # (clamped to not overlap the previous replacement or 0) and fill it
+        # with silence. See WORD_FAMILY_LEAD_IN_MS for the calibration.
+        word_lead_in = lead_in_ms if lead_in_ms is not None else get_word_lead_in_ms(word)
+        pad_start_ms = max(prev_end_ms, start_ms - word_lead_in)
+        actual_lead_in_ms = start_ms - pad_start_ms
+
         # --- Extract the gap segment before this replacement ---
-        if start_ms > prev_end_ms:
+        if pad_start_ms > prev_end_ms:
             gap_path = str(temp_dir / f"gap_{i:04d}.wav")
             log(f"[{i + 1}/{len(sorted_replacements)}] "
-                f"Extracting gap [{prev_end_ms}-{start_ms}]ms "
-                f"({start_ms - prev_end_ms}ms)...")
+                f"Extracting gap [{prev_end_ms}-{pad_start_ms}]ms "
+                f"({pad_start_ms - prev_end_ms}ms)...")
             try:
                 extract_segment(
-                    audio_path, prev_end_ms, start_ms, gap_path,
+                    audio_path, prev_end_ms, pad_start_ms, gap_path,
                     sample_rate, channels, crossfade_ms
                 )
                 segment_files.append(gap_path)
@@ -373,6 +482,19 @@ def build_censored_audio(
                     f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
                 skipped_count += 1
                 continue
+
+        # --- Silence lead-in to mute the leaked word onset ---
+        if actual_lead_in_ms > 0:
+            silence_path = str(temp_dir / f"silence_{i:04d}.wav")
+            try:
+                generate_silence(
+                    actual_lead_in_ms, silence_path, sample_rate, channels
+                )
+                segment_files.append(silence_path)
+            except subprocess.CalledProcessError as exc:
+                log(f"  ERROR generating silence lead-in: "
+                    f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
+                # non-fatal: the onset may leak, but keep the replacement
 
         # --- Convert and add the replacement audio ---
         # Target duration = exact length of the original word (keeps A/V sync)
@@ -513,15 +635,113 @@ def mux_video_audio(
     return True
 
 
+def has_video_stream(audio_path: str) -> bool:
+    """Return True if the input file contains at least one video stream.
+
+    Used to decide between video-mux mode (copy original video + censored audio)
+    and audio-only mode (encode the censored audio to the output format).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return "video" in result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return False
+
+
+def encode_audio_only(
+    censored_audio: str,
+    output_path: str,
+) -> bool:
+    """Encode the censored WAV into the final audio-only container.
+
+    Used when the input has no video stream (audio-only mode). The output
+    codec/container is inferred from the output file's extension.
+
+    Args:
+        censored_audio: Path to the censored WAV audio file.
+        output_path: Final output audio path (format inferred from extension).
+
+    Returns:
+        True if successful.
+    """
+    log(f"[encode] Encoding censored audio -> {output_path}")
+
+    ext = Path(output_path).suffix.lower().lstrip(".")
+    format_map = {
+        "m4b": ("aac", "ipod"),
+        "m4a": ("aac", "ipod"),
+        "mp4": ("aac", "ipod"),
+        "mp3": ("libmp3lame", "mp3"),
+        "wav": ("pcm_s16le", "wav"),
+        "flac": ("flac", "flac"),
+        "ogg": ("libvorbis", "ogg"),
+    }
+    audio_codec, container = format_map.get(ext, ("aac", "ipod"))
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", censored_audio,
+        "-c:a", audio_codec,
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+    ]
+    if container:
+        cmd += ["-f", container]
+    cmd.append(output_path)
+
+    log(f"[encode] Running: {' '.join(cmd[:4])} ...")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        log(f"[error] ffmpeg encode failed!")
+        log(f"  stderr (last 1000 chars): {result.stderr[-1000:]}")
+        return False
+
+    if not Path(output_path).is_file():
+        log(f"[error] Output file not created: {output_path}")
+        return False
+
+    output_size_mb = Path(output_path).stat().st_size / (1024 * 1024)
+    output_duration = get_audio_duration_seconds(output_path)
+    log(
+        f"[encode] Output created: {output_path} "
+        f"({output_size_mb:.1f} MB, {output_duration / 3600:.1f}h)"
+    )
+    return True
+
+
 def splice_audio_ffmpeg(
     audio_path: str,
     replacements: list[dict],
     audio_dir: Path,
     output_path: str,
     crossfade_ms: int = CROSSFADE_MS,
+    lead_in_ms: int | None = None,
     dry_run: bool = False,
 ) -> bool:
-    """Main splice entry point for video files."""
+    """Main splice entry point. Handles both video and audio-only inputs.
+
+    lead_in_ms: None = per-family auto (50ms for ass/shit, 0ms for others).
+                int  = override all words with this value.
+    """
+
+    # --- Detect video vs audio-only ---
+    is_video = has_video_stream(audio_path)
+    if is_video:
+        log("[mode] VIDEO detected — output will contain the original video + censored audio")
+    else:
+        log("[mode] Audio-only input detected — output will be a censored audio file")
 
     if dry_run:
         log("[dry-run] Validating inputs without processing...")
@@ -540,6 +760,7 @@ def splice_audio_ffmpeg(
                 f"{entry.get('word', '')} -> {replacement} [{status}]")
         log(f"[dry-run] {len(sorted_replacements)} replacements, "
             f"{missing} missing .wav files")
+        log(f"[dry-run] Output mode: {'VIDEO (mux)' if is_video else 'AUDIO (encode)'}")
         return missing == 0
 
     if not replacements:
@@ -549,6 +770,12 @@ def splice_audio_ffmpeg(
     sample_rate = props["sample_rate"]
     channels = props["channels"]
     log(f"[audio] Source audio: {sample_rate} Hz, {channels} channel(s)")
+    if lead_in_ms is not None:
+        log(f"[audio] Lead-in pad: {lead_in_ms}ms silence before ALL replacements "
+            f"(manual override)")
+    else:
+        log(f"[audio] Lead-in pad: per-family auto (50ms for ass/shit words, "
+            f"0ms for god/fuck/damn)")
 
     temp_dir = Path(tempfile.mkdtemp(prefix="splice_"))
     try:
@@ -563,18 +790,25 @@ def splice_audio_ffmpeg(
             sample_rate=sample_rate,
             channels=channels,
             crossfade_ms=crossfade_ms,
+            lead_in_ms=lead_in_ms,
         )
         if not ok:
             return False
 
-        # Step 2: Mux original video + censored audio
-        reencode = os.environ.get("VIDEO_REENCODE", "0") == "1"
-        success = mux_video_audio(
-            original_video=audio_path,
-            censored_audio=censored_audio_wav,
-            output_path=output_path,
-            reencode_video=reencode,
-        )
+        # Step 2: Produce final output (mux for video, encode for audio-only)
+        if is_video:
+            reencode = os.environ.get("VIDEO_REENCODE", "0") == "1"
+            success = mux_video_audio(
+                original_video=audio_path,
+                censored_audio=censored_audio_wav,
+                output_path=output_path,
+                reencode_video=reencode,
+            )
+        else:
+            success = encode_audio_only(
+                censored_audio=censored_audio_wav,
+                output_path=output_path,
+            )
 
         if not success:
             return False
@@ -597,13 +831,14 @@ def splice_audio_ffmpeg(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Splice generated replacement audio into the original video "
-                    "using ffmpeg. The video stream is copied losslessly; only "
+        description="Splice generated replacement audio into the original video/audio "
+                    "using ffmpeg. Video streams are copied losslessly; for audio-only "
+                    "inputs the censored audio is encoded to the output format. Only "
                     "the audio is censored.",
     )
     p.add_argument(
         "audio",
-        help="Path to the original video file",
+        help="Path to the original video or audio file",
     )
     p.add_argument(
         "--replacements-json",
@@ -625,6 +860,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=CROSSFADE_MS,
         help=f"Fade duration in ms at segment boundaries (default: {CROSSFADE_MS})",
+    )
+    p.add_argument(
+        "--lead-in-ms",
+        type=int,
+        default=None,
+        help=("Silence (ms) inserted before each replacement to mute the leaked "
+              "onset of the original word. Default: per-family auto (50ms for "
+              "ass/shit, 0ms for god/fuck/damn). Pass 0 to disable all lead-in, "
+              "or a specific value to override all words."),
     )
     p.add_argument(
         "--dry-run",
@@ -657,6 +901,9 @@ def main(argv: list[str] | None = None) -> int:
     log(f"[input] Original file: {args.audio}")
     log(f"[input] Replacement .wav directory: {audio_dir}")
     log(f"[input] Crossfade: {args.crossfade_ms}ms fades at boundaries")
+    lead_desc = (f"{args.lead_in_ms}ms (all words)" if args.lead_in_ms is not None
+                 else "per-family auto (50ms ass/shit, 0ms others)")
+    log(f"[input] Lead-in pad: {lead_desc}")
     log(f"[input] Output: {args.output}")
 
     try:
@@ -666,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
             audio_dir=audio_dir,
             output_path=args.output,
             crossfade_ms=args.crossfade_ms,
+            lead_in_ms=args.lead_in_ms,
             dry_run=args.dry_run,
         )
     except KeyboardInterrupt:

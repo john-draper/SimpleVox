@@ -211,17 +211,18 @@ REPLACEMENTS: dict[str, str] = {
 
 
 def clean_word(raw: str) -> str:
-    """Strip surrounding punctuation and lowercase a word for matching.
+    """Strip surrounding whitespace/punctuation and lowercase a word for matching.
 
     Examples:
         "Dang,"  -> "dang"
         "'Em"    -> "em"
         "WELL?"  -> "well"
+        " hell"  -> "hell"   (faster-whisper emits leading spaces)
     Internal punctuation (e.g. "don't" -> "don't") is preserved.
     """
     import string
 
-    return raw.strip(string.punctuation).lower()
+    return raw.strip().strip(string.punctuation).lower()
 
 
 def find_matches(words: list[dict]) -> list[dict]:

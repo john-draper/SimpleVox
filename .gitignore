@@ -20,3 +20,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# One-off analysis scripts (calibration tools with local hardcoded paths;
+# methodology is documented in splice_audio.py comments)
+_analyze_*.py
