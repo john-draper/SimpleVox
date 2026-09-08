@@ -179,8 +179,9 @@ def stage4_splice(video: str, replacements_json: str, audio_dir: str, final_outp
     log(f"  Replacements: {replacements_json}")
     log(f"  WAV dir:      {audio_dir}")
     log(f"  Output:       {final_output}")
+    from splice_audio import lead_in_desc
     lead_desc = (f"{lead_in_ms}ms (all words)" if lead_in_ms is not None
-                 else "per-family auto (50ms ass/shit, 0ms others)")
+                 else lead_in_desc())
     log(f"  Lead-in pad:  {lead_desc}")
     log(f"  (Only the audio is censored; video stream, if any, is copied losslessly.)")
     try:
@@ -420,10 +421,9 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help=("Silence (ms) inserted before each replacement to mute the leaked "
-              "onset of the original word. Default: per-family auto (50ms for "
-              "ass/shit words, 0ms for god/fuck/damn — WhisperX timestamps stop-"
-              "consonant words correctly). Pass 0 to disable all lead-in, or a "
-              "specific value to override all words."),
+              "onset of the original word. Default: per-family auto "
+              "(see splice_audio.WORD_FAMILY_LEAD_IN_MS). Pass 0 to disable "
+              "all lead-in, or a specific value to override all words."),
     )
     args = p.parse_args(argv)
 

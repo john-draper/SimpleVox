@@ -76,11 +76,30 @@ MIN_GAIN_DB = -12.0  # safety clamp to prevent excessive attenuation
 #   *  confounded by intrinsic word-length (ass has no stop consonants)
 #   ** unreliable for vowels (gradual onset, no sharp attack)
 #
-# Final calibrated values: 50ms for both A and S families.
+# Final calibrated values:
+#   - Family Guy (dry dialogue mix, acoustic-onset measurable): 50ms A/S.
+#   - American Dad (music/score continuously under dialogue — NO silence gap
+#     before words, onset not measurable acoustically): user-verified leaks
+#     through 50ms AND 150ms on S01E01 'ass' (faint "Aa" + trailing "s").
+#     Recalibrated empirically: A=220ms, S=150ms lead-in.
 WORD_FAMILY_LEAD_IN_MS = {
-    "a": 50,  # ass, asshole, asses, ... (vowel onset leaks ~50ms)
-    "s": 50,  # shit, shithead, shits, ... (fricative "sh" leaks ~50ms)
+    "a": 220,  # ass, asshole, asses, ... (vowel onset leaks far past 150ms in music-heavy mixes)
+    "s": 150,  # shit, shithead, shits, ... (fricative "sh" onset leaks past 50ms)
 }
+
+# Trailing frication ("s" at the end of ass/asses/shits) continues PAST the
+# reported word end and bleeds into the gap after the replacement ("buttS").
+# Spectral measurement on AD S01E01 'ass': the /s/ HF ridge (5.5-11kHz) runs
+# from -50ms BEFORE the reported end to +165-170ms AFTER it. So words ending
+# in "s" get a 200ms tail (measured 170ms + margin); other endings get 60ms.
+# Keyed on the word's LAST letter, applied only to the a/s families.
+TAIL_FRICATIVE_MS = 200   # word ends in "s" (ass, asses, shits, shitsnacks...)
+TAIL_OTHER_MS = 60        # any other ending (asshole, shit's abrupt /t/, ...)
+
+# Of the lead-in, only this much is pure silence; the replacement itself is
+# stretched to start earlier and fill the rest (user preference: the word
+# "comes in a little earlier and lasts a little longer" rather than dead air).
+LEAD_IN_SILENCE_GUARD_MS = 60
 
 
 def get_word_lead_in_ms(word: str) -> int:
@@ -101,6 +120,29 @@ def get_word_lead_in_ms(word: str) -> int:
     if not cleaned:
         return 0
     return WORD_FAMILY_LEAD_IN_MS.get(cleaned[0], 0)
+
+
+def get_word_tail_out_ms(word: str) -> int:
+    """Return the calibrated tail-out (ms) for a profane word — how far past
+    the reported END the replacement region should extend to swallow trailing
+    frication ("ass" -> "buttS"). Applies only to the a/s families (first
+    letter); the amount depends on the word's LAST letter (fricative /s/
+    leaks ~170ms past the reported end; other endings leak far less).
+    """
+    import string
+
+    cleaned = word.strip().strip(string.punctuation).lower()
+    if not cleaned:
+        return 0
+    if cleaned[0] not in ("a", "s"):
+        return 0
+    return TAIL_FRICATIVE_MS if cleaned[-1] == "s" else TAIL_OTHER_MS
+
+
+def lead_in_desc() -> str:
+    """Human-readable description of the per-family lead-in calibration."""
+    fams = ", ".join(f"'{k}'-initial: {v}ms" for k, v in sorted(WORD_FAMILY_LEAD_IN_MS.items()))
+    return f"per-family auto ({fams}; others 0ms)"
 
 
 def log(msg: str) -> None:
@@ -423,8 +465,7 @@ def build_censored_audio(
     fricative/vowel-initial words late). The amount is determined per word:
       - If lead_in_ms is an int, it overrides ALL words (manual mode).
       - If lead_in_ms is None (default), each word uses its calibrated family
-        value from get_word_lead_in_ms() (50ms for ass/shit, 0ms for
-        god/fuck/damn).
+        value from get_word_lead_in_ms() (see WORD_FAMILY_LEAD_IN_MS).
 
     The lead-in is clamped so it never overlaps the previous replacement or 0.
 
@@ -457,13 +498,22 @@ def build_censored_audio(
             skipped_count += 1
             continue
 
-        # --- Lead-in pad -----------------------------------------------------
-        # Extend the censored region backward by up to the word's lead-in
-        # (clamped to not overlap the previous replacement or 0) and fill it
-        # with silence. See WORD_FAMILY_LEAD_IN_MS for the calibration.
+        # --- Lead-in / tail-out region ---------------------------------------
+        # The censored region is [start - lead_in, end + tail_out] (each clamped
+        # to the neighbours so consecutive replacements never overlap). The
+        # first LEAD_IN_SILENCE_GUARD_MS of the lead-in is pure silence; the
+        # replacement itself is stretched to start earlier and fill the rest,
+        # then run past the reported end to swallow trailing frication.
         word_lead_in = lead_in_ms if lead_in_ms is not None else get_word_lead_in_ms(word)
+        word_tail = get_word_tail_out_ms(word)
         pad_start_ms = max(prev_end_ms, start_ms - word_lead_in)
         actual_lead_in_ms = start_ms - pad_start_ms
+
+        eff_end_ms = end_ms + word_tail
+        if i + 1 < len(sorted_replacements):
+            nxt_start_ms = int(float(sorted_replacements[i + 1].get("start", 0.0)) * 1000)
+            eff_end_ms = min(eff_end_ms, nxt_start_ms)
+        eff_end_ms = max(eff_end_ms, min(end_ms, total_duration_ms - 1))
 
         # --- Extract the gap segment before this replacement ---
         if pad_start_ms > prev_end_ms:
@@ -483,12 +533,15 @@ def build_censored_audio(
                 skipped_count += 1
                 continue
 
-        # --- Silence lead-in to mute the leaked word onset ---
-        if actual_lead_in_ms > 0:
+        # --- Silence guard before the replacement -----------------------------
+        # Only LEAD_IN_SILENCE_GUARD_MS of the lead-in is silence; the rest is
+        # filled by the replacement starting early (see below).
+        silence_ms = min(actual_lead_in_ms, LEAD_IN_SILENCE_GUARD_MS)
+        if silence_ms > 0:
             silence_path = str(temp_dir / f"silence_{i:04d}.wav")
             try:
                 generate_silence(
-                    actual_lead_in_ms, silence_path, sample_rate, channels
+                    silence_ms, silence_path, sample_rate, channels
                 )
                 segment_files.append(silence_path)
             except subprocess.CalledProcessError as exc:
@@ -496,9 +549,12 @@ def build_censored_audio(
                     f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
                 # non-fatal: the onset may leak, but keep the replacement
 
-        # --- Convert and add the replacement audio ---
-        # Target duration = exact length of the original word (keeps A/V sync)
-        target_dur = (end_ms - start_ms) / 1000.0
+        # --- Convert and add the replacement audio -----------------------------
+        # Target duration spans [start - (lead-in - guard), end + tail-out]:
+        # the word comes in earlier and lasts longer, keeping A/V sync because
+        # the concat timeline is unchanged.
+        rep_start_ms = start_ms - (actual_lead_in_ms - silence_ms)
+        target_dur = (eff_end_ms - rep_start_ms) / 1000.0
         gain_db = compute_loudness_gain_db(
             original_audio=audio_path,
             replacement_wav=str(wav_path),
@@ -523,7 +579,7 @@ def build_censored_audio(
                 f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
             skipped_count += 1
 
-        prev_end_ms = end_ms
+        prev_end_ms = eff_end_ms
 
     # --- Extract the final gap (after last replacement to end) ---
     if prev_end_ms < total_duration_ms:
@@ -605,6 +661,7 @@ def mux_video_audio(
         cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
     else:
         log("[mux] Video: STREAM COPY (fast, lossless)")
+        cmd += ["-c:v", "copy"]
 
     # Audio: encode to AAC (widely compatible)
     cmd += [
@@ -732,7 +789,7 @@ def splice_audio_ffmpeg(
 ) -> bool:
     """Main splice entry point. Handles both video and audio-only inputs.
 
-    lead_in_ms: None = per-family auto (50ms for ass/shit, 0ms for others).
+    lead_in_ms: None = per-family auto (see WORD_FAMILY_LEAD_IN_MS).
                 int  = override all words with this value.
     """
 
@@ -769,13 +826,22 @@ def splice_audio_ffmpeg(
     props = get_audio_properties(audio_path)
     sample_rate = props["sample_rate"]
     channels = props["channels"]
-    log(f"[audio] Source audio: {sample_rate} Hz, {channels} channel(s)")
+    if channels != 2:
+        # Multi-channel (e.g. 5.1 AC3) first track would otherwise collapse to
+        # MONO in extract_segment()/convert_replacement_wav() ("stereo if 2ch
+        # else mono"). Normalize to stereo instead: gaps are downmixed 5.1->2.0
+        # and the final AAC track is consistent stereo, matching the majority
+        # of sources.
+        log(f"[audio] Source audio: {sample_rate} Hz, {channels} channel(s) "
+            f"-> normalizing output to stereo (downmix)")
+        channels = 2
+    else:
+        log(f"[audio] Source audio: {sample_rate} Hz, {channels} channel(s)")
     if lead_in_ms is not None:
         log(f"[audio] Lead-in pad: {lead_in_ms}ms silence before ALL replacements "
             f"(manual override)")
     else:
-        log(f"[audio] Lead-in pad: per-family auto (50ms for ass/shit words, "
-            f"0ms for god/fuck/damn)")
+        log(f"[audio] Lead-in pad: {lead_in_desc()}")
 
     temp_dir = Path(tempfile.mkdtemp(prefix="splice_"))
     try:
@@ -866,8 +932,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help=("Silence (ms) inserted before each replacement to mute the leaked "
-              "onset of the original word. Default: per-family auto (50ms for "
-              "ass/shit, 0ms for god/fuck/damn). Pass 0 to disable all lead-in, "
+              "onset of the original word. Default: per-family auto "
+              "(see WORD_FAMILY_LEAD_IN_MS). Pass 0 to disable all lead-in, "
               "or a specific value to override all words."),
     )
     p.add_argument(
@@ -902,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
     log(f"[input] Replacement .wav directory: {audio_dir}")
     log(f"[input] Crossfade: {args.crossfade_ms}ms fades at boundaries")
     lead_desc = (f"{args.lead_in_ms}ms (all words)" if args.lead_in_ms is not None
-                 else "per-family auto (50ms ass/shit, 0ms others)")
+                 else lead_in_desc())
     log(f"[input] Lead-in pad: {lead_desc}")
     log(f"[input] Output: {args.output}")
 
