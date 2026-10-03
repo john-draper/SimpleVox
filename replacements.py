@@ -146,6 +146,17 @@ REPLACEMENTS: dict[str, str] = {
     "mindfuck": "headgame",
     "clusterfuck": "disaster",
     "effing": "flipping",
+    # Motherfucker variants Whisper emits that aren't the plain forms:
+    # "Motherfuck!", "Motherfuckin'", and the cut-off "Motherf-".
+    "motherfuck": "scoundrel",
+    "motherfucks": "scoundrels",
+    "motherfuckin": "flippin",
+    "motherf": "scoundrel",
+    # Glued fuck-compounds seen in transcripts (no hyphen -> no fallback).
+    "fucknut": "twit",
+    "fucknuts": "twits",
+    "fuckpot": "weirdo",
+    "derpfucker": "doofus",
     # Hyphenated compounds (clean_word() preserves internal punctuation)
     "fuck-up": "messup",
     "fuck-all": "nothing",
@@ -155,6 +166,20 @@ REPLACEMENTS: dict[str, str] = {
     "mother-fucking": "flipping",
     "mind-fuck": "headgame",
     "cluster-fuck": "disaster",
+
+    # Whisper sometimes self-censors and emits literal asterisk spellings
+    # ("f***ing", "f**ked") while the AUDIO says the full word. These are
+    # audible profanity, so they are keys like any other form. clean_word()
+    # strips the surrounding punctuation, so keys are the bare asterisk forms.
+    "f***": "freak",
+    "f***s": "freaks",
+    "f***er": "jerk",
+    "f***ing": "stinking",
+    "f***ed": "freaked",
+    "f**k": "freak",
+    "f**ker": "jerk",
+    "f**king": "stinking",
+    "f**ked": "freaked",
 
     # --- Damn / hell / goddamn family ---
     "damn": "dang",
@@ -345,6 +370,16 @@ def find_matches(words: list[dict]) -> list[dict]:
             stem_replacement = _resolve_key(key[:-2])
             if stem_replacement is not None:
                 replacement = stem_replacement + "'s"
+        if replacement is None and "*" in raw:
+            # Whisper's censored spellings that END in asterisks ("f***"):
+            # clean_word() strips trailing asterisks as punctuation, leaving
+            # a bare "f" that matches nothing. Strip every punctuation
+            # character EXCEPT asterisks, so the censored form itself is the
+            # lookup key ("f***" -> dictionary entry "f***").
+            import string
+            star_key = raw.strip().strip(
+                "".join(c for c in string.punctuation if c != "*")).lower()
+            replacement = REPLACEMENTS.get(star_key)
         if replacement is not None:
             matches.append({
                 "word": raw,                     # original (uncleaned) word

@@ -33,6 +33,19 @@ MATCH_CASES = {
     "monkey-ass": "monkey-butt",
     "ass-in-ass": "butt-in-butt",
     "stupid-as-shit": "stupid-as-crap",
+    # motherfucker variants Whisper emits besides the plain forms
+    "Motherfuck!": "scoundrel",
+    "Motherfuckin'": "flippin",
+    "Motherf-": "scoundrel",
+    # Whisper's literal asterisk spellings (audio says the full word)
+    "f***ing": "stinking",
+    "f**ked.": "freaked",
+    "F**k?": "freak",
+    "f***": "freak",        # asterisk-final form survives clean_word()
+    "f***.": "freak",
+    # glued fuck-compounds
+    "fucknuts.": "twits",
+    "DERPFUCKER!": "doofus",
 }
 
 NO_MATCH_CASES = [
@@ -42,6 +55,10 @@ NO_MATCH_CASES = [
     "mother-in-law",    # no profane part
     "t-shirt",
     "bitchs",           # glued plural is deliberately not a key
+    "f-",               # cut-off letter F; audio never completes the word
+    "F'd",              # softened "effed" — audio already says a clean form
+    "f-ing",            # softened "eff-ing"
+    "self-aware",       # clean hyphenated compounds
     "",
 ]
 
