@@ -208,6 +208,58 @@ REPLACEMENTS: dict[str, str] = {
     "fags": "gays",
     "fuchs": "craps",
     "dipshit": "dipstick",
+
+    # --- Douche family ---
+    "douche": "jerk",
+    "douches": "jerks",
+    "douchebag": "ninny",
+    "douchebags": "ninnies",
+    "douche-canoe": "ninny",
+
+    # --- Bastard family ---
+    "bastard": "rascal",
+    "bastards": "rascals",
+    "bastardy": "rascally",
+
+    # --- Prick family ---
+    "prick": "twit",
+    "pricks": "twits",
+
+    # --- Dick family ---
+    "dick": "dork",
+    "dicks": "dorks",
+    "dickhead": "doofus",
+    "dickheads": "doofuses",
+    "dickwad": "doofus",
+    "dickhole": "doofus",
+
+    # --- Piss family ---
+    "piss": "pee",
+    "pisses": "pees",
+    "pissed": "ticked",
+    "pissing": "ticking",
+    "pisser": "stinker",
+    "pissed-off": "ticked-off",
+
+    # --- Retard family ---
+    "retard": "dummy",
+    "retards": "dummies",
+    "retarded": "ridiculous",
+
+    # --- Cock family ---
+    "cock": "willy",
+    "cocks": "willies",
+
+    # --- Whore / slut ---
+    "whore": "hussy",
+    "whores": "hussies",
+    "slut": "scamp",
+    "sluts": "scamps",
+    "slutty": "scampy",
+
+    # --- Small gaps ---
+    "goddamnit": "doggone",
+    "hells": "hecks",
 }
 
 
@@ -220,10 +272,46 @@ def clean_word(raw: str) -> str:
         "WELL?"  -> "well"
         " hell"  -> "hell"   (faster-whisper emits leading spaces)
     Internal punctuation (e.g. "don't" -> "don't") is preserved.
+    Curly quotes/apostrophes are normalized to ASCII first (Whisper
+    occasionally emits them; string.punctuation does not include them).
     """
     import string
 
-    return raw.strip().strip(string.punctuation).lower()
+    normalized = (raw.replace("\u2019", "'")   # right single quote
+                     .replace("\u2018", "'")   # left single quote
+                     .replace("\u201c", '"')   # left double quote
+                     .replace("\u201d", '"'))  # right double quote
+    return normalized.strip().strip(string.punctuation).lower()
+
+
+def _resolve_key(key: str) -> str | None:
+    """Resolve a cleaned token to a replacement, with hyphen fallbacks.
+
+    Whisper routinely emits hyphenated compounds ("dumb-ass", "weak-ass",
+    "ass-in-ass") whose exact form is not a dictionary key. Resolution order:
+
+      1. exact key — curated compounds always win ("kick-ass" -> "kickbutt",
+         "half-assed" -> "sloppy")
+      2. hyphens stripped — "dumb-ass" -> "dumbass" -> "idiot"
+      3. per-part — replace only the profane hyphen-parts, keep the rest
+         verbatim ("weak-ass" -> "weak-butt", "ass-in-ass" -> "butt-in-butt",
+         "monkey-ass" -> "monkey-butt"); fires only if at least one part
+         is a key, so clean compounds ("mother-in-law") never match
+
+    clean_word() preserves internal punctuation, so this hyphen handling
+    must live HERE (in matching) — do not move it into clean_word().
+    """
+    if key in REPLACEMENTS:
+        return REPLACEMENTS[key]
+    if "-" not in key:
+        return None
+    glued = key.replace("-", "")
+    if glued in REPLACEMENTS:
+        return REPLACEMENTS[glued]
+    parts = key.split("-")
+    if any(p in REPLACEMENTS for p in parts):
+        return "-".join(REPLACEMENTS.get(p, p) for p in parts)
+    return None
 
 
 def find_matches(words: list[dict]) -> list[dict]:
@@ -235,6 +323,14 @@ def find_matches(words: list[dict]) -> list[dict]:
     Returns a list of matched entries with the original word, its timestamps,
     and the replacement text:
         {"word": str, "start": float, "end": float, "replacement": str}
+
+    Possessives/contractions ("shit's", "bitch's", "God's") match on the stem
+    ("shit", "bitch", "god") with "'s" appended to the spoken replacement
+    ("crap's", "brat's", "gosh's"). The stem is guaranteed to be a dictionary
+    key (it heads every word family), whereas the glued plural produced by
+    deleting the apostrophe ("bitchs") often is not. The stem itself goes
+    through _resolve_key, so possessive hyphen compounds also work
+    ("dumb-ass's" -> "idiot's").
     """
     matches: list[dict] = []
     for entry in words:
@@ -244,11 +340,16 @@ def find_matches(words: list[dict]) -> list[dict]:
         if not isinstance(raw, str):
             continue
         key = clean_word(raw)
-        if key in REPLACEMENTS:
+        replacement = _resolve_key(key)
+        if replacement is None and key.endswith("'s"):
+            stem_replacement = _resolve_key(key[:-2])
+            if stem_replacement is not None:
+                replacement = stem_replacement + "'s"
+        if replacement is not None:
             matches.append({
                 "word": raw,                     # original (uncleaned) word
                 "start": float(entry["start"]),
                 "end": float(entry["end"]),
-                "replacement": REPLACEMENTS[key],
+                "replacement": replacement,
             })
     return matches
