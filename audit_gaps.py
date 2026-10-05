@@ -50,14 +50,43 @@ EUPHEMISM_RECHECK = {"heck", "darn", "gosh", "dang", "freak", "freaking"}
 MIN_CLIP_PROB = 0.4   # ignore clip words below this faster-whisper probability
 
 
-def find_gaps(words: list[dict], min_gap: float, max_gap: float) -> list[tuple[float, float]]:
-    """Interior silences between consecutive words, in (start, end) seconds."""
-    gaps = []
-    for a, b in zip(words, words[1:]):
-        gap = b["start"] - a["end"]
-        if min_gap <= gap <= max_gap:
-            gaps.append((a["end"], b["start"]))
+def find_gaps(words: list[dict], min_gap: float, max_gap: float,
+              regions: str = "interior", media_duration: float | None = None) -> list[tuple[float, float]]:
+    """Silences to re-check, in (start, end) seconds.
+
+    interior: between consecutive words, gap within [min_gap, max_gap].
+    tail:     from the last word's end to the media end (post-credit scenes;
+              S02E10's end-tag chant "get the fuck off" x4 lived here, past
+              both the interior-gap logic and its 8s cap).
+    head:     from 0 to the first word's start.
+    """
+    wanted = {r.strip() for r in regions.split(",")}
+    gaps: list[tuple[float, float]] = []
+    if "interior" in wanted:
+        for a, b in zip(words, words[1:]):
+            gap = b["start"] - a["end"]
+            if min_gap <= gap <= max_gap:
+                gaps.append((a["end"], b["start"]))
+    if words:
+        if "head" in wanted and words[0]["start"] >= min_gap:
+            gaps.append((0.0, words[0]["start"]))
+        if "tail" in wanted and media_duration is not None:
+            tail = media_duration - words[-1]["end"]
+            if tail >= min_gap:
+                gaps.append((words[-1]["end"], media_duration))
     return gaps
+
+
+def media_duration(path: Path) -> float | None:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=60)
+        return float(r.stdout.strip())
+    except Exception:
+        return None
 
 
 def clip_words(fw_model, media: Path, t0: float, t1: float) -> list[dict]:
@@ -107,6 +136,8 @@ def main(argv=None) -> int:
     ap.add_argument("--min-gap", type=float, default=2.0)
     ap.add_argument("--max-gap", type=float, default=8.0)
     ap.add_argument("--seasons", default="all", help="comma list of season numbers")
+    ap.add_argument("--regions", default="interior",
+                    help="comma list: interior,tail,head (default interior)")
     ap.add_argument("--include-swaps", action="store_true",
                     help="also write euphemism-swap finds into extras")
     ap.add_argument("--dry", action="store_true")
@@ -142,9 +173,18 @@ def main(argv=None) -> int:
                 continue
 
             extras, swap_reports = [], []
-            gaps = find_gaps(words, args.min_gap, args.max_gap)
+            gaps = find_gaps(words, args.min_gap, args.max_gap,
+                             regions=args.regions,
+                             media_duration=media_duration(media))
             total_gaps += len(gaps)
+            # long tails/heads: check in consecutive <=30s chunks
+            chunked = []
             for t0, t1 in gaps:
+                while t1 - t0 > 30.0:
+                    chunked.append((t0, t0 + 30.0))
+                    t0 = t0 + 30.0
+                chunked.append((t0, t1))
+            for t0, t1 in chunked:
                 for w in clip_words(fw, media, t0, t1):
                     if profane(w["word"]):
                         m = find_matches([w])[0]
