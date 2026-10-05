@@ -39,6 +39,20 @@ from transcribe import select_device
 
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".wmv", ".flv"}
 
+# Passed as faster-whisper's initial_prompt. Whisper has a politeness bias:
+# it sometimes DELETES short profane utterances ("What the fuck?" at S02E07
+# 09:35 never made it into the pass-2 transcript) or swaps in a euphemism
+# ("heck", "f***ing"). The prompt tells it to transcribe verbatim instead.
+# whisperx's FasterWhisperPipeline.transcribe() does NOT forward initial_prompt
+# (silently dropped from asr_options too), so Transcriber below calls the
+# underlying faster-whisper model directly and uses whisperx only for word
+# alignment.
+VERBATIM_PROMPT = (
+    "The following is a verbatim transcript of an uncensored adult animated "
+    "comedy. Profanity is transcribed exactly as spoken: fuck, fucking, shit, "
+    "bitch, asshole."
+)
+
 
 def log(msg: str = "") -> None:
     print(msg, flush=True)
@@ -79,14 +93,19 @@ class Transcriber:
         log(f"[model] alignment model loaded in {time.time() - t0:.1f}s")
 
     def transcribe(self, media_path: Path) -> list[dict]:
-        """Replicates transcribe.transcribe_audio() steps 2-6 with cached models."""
+        """Transcribe via faster-whisper (verbatim prompt) + whisperx alignment."""
         wx = self.whisperx
         audio = wx.load_audio(str(media_path))
-        result = self.model.transcribe(
-            audio, batch_size=self.batch_size, language="en",
+        fw_segments, _info = self.model.model.transcribe(
+            audio, language="en", beam_size=5, vad_filter=True,
+            initial_prompt=VERBATIM_PROMPT,
         )
+        segments = [
+            {"start": s.start, "end": s.end, "text": s.text}
+            for s in fw_segments
+        ]
         result = wx.align(
-            result["segments"], self.align_model, self.align_metadata,
+            segments, self.align_model, self.align_metadata,
             audio, self.device, return_char_alignments=False,
         )
         words: list[dict] = []
