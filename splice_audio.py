@@ -85,6 +85,11 @@ MIN_GAIN_DB = -12.0  # safety clamp to prevent excessive attenuation
 WORD_FAMILY_LEAD_IN_MS = {
     "a": 220,  # ass, asshole, asses, ... (vowel onset leaks far past 150ms in music-heavy mixes)
     "s": 150,  # shit, shithead, shits, ... (fricative "sh" onset leaks past 50ms)
+    # Added 2026-10-04: the FG calibration measured 0ms leak for stop-initial
+    # "fuck", but on Rick and Morty the user clearly hears the original "fuh"
+    # onset before the replacement ("fff-(freek)"). R&M's burbled delivery
+    # aligns starts late; /f/ is a fricative like /s/. When in doubt, pad.
+    "f": 150,  # fuck, fucking, fucker, ... (audible /f/ onset leak on R&M)
 }
 
 # Trailing frication ("s" at the end of ass/asses/shits) continues PAST the
@@ -106,9 +111,9 @@ def get_word_lead_in_ms(word: str) -> int:
     """Return the calibrated lead-in (ms) for a profane word based on its
     first sound.
 
-    Vowel-initial ('a') and fricative-initial ('s'/'sh') words get a 50ms
-    lead-in to cover their leaked onset. Stop-initial words (god, fuck, damn,
-    etc.) get 0 — WhisperX timestamps them correctly.
+    Vowel-initial ('a'), fricative-initial ('s'/'sh') and 'f'-initial words
+    get a lead-in to cover their leaked onset. Other stop-initial words (god,
+    damn, etc.) get 0 — WhisperX timestamps them correctly.
 
     This is keyed on the first letter of the cleaned word, which correctly
     handles compounds: "bullshit" starts with 'b' (no pad), "asshole" starts

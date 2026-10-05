@@ -54,6 +54,22 @@ VERBATIM_PROMPT = (
 )
 
 
+def merge_extra_words(words: list[dict], extra: list[dict]) -> list[dict]:
+    """Merge confirmed extra tokens (audit extras / swap suspects / bleed-fix
+    windows) into a fresh transcription, dropping extras that overlap a
+    transcribed token (the fresh pass already heard that spot) or each other.
+    Keeps the transcribed token on overlap - its timestamps match this audio."""
+    def overlaps(a, b):
+        return min(a["end"], b["end"]) - max(a["start"], b["start"]) > 0.05
+
+    merged = list(words)
+    for e in sorted(extra, key=lambda x: x["start"]):
+        if any(overlaps(e, w) for w in merged):
+            continue
+        merged.append(e)
+    return sorted(merged, key=lambda w: w["start"])
+
+
 def log(msg: str = "") -> None:
     print(msg, flush=True)
 
@@ -214,6 +230,21 @@ def main(argv: list[str] | None = None) -> int:
                     json.dumps(words, ensure_ascii=False, indent=2),
                     encoding="utf-8")
                 log(f"  [1/4] transcribed {len(words)} words")
+
+            # Confirmed extra tokens from earlier audit passes (gap extras,
+            # euphemism swaps, f-word bleed-fix windows) live beside the
+            # transcription as <stem>_extra_words.json; merge non-overlapping.
+            extra_json = intermediate_dir / f"{video_path.stem}_extra_words.json"
+            if extra_json.is_file():
+                try:
+                    extra = json.loads(extra_json.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    extra = []
+                if extra:
+                    before = len(words)
+                    words = merge_extra_words(words, extra)
+                    log(f"  [1/4] merged {len(words) - before} extra word(s) "
+                        f"from {extra_json.name}")
 
             # --- Stage 2: profanity filter ---
             matches = find_matches(words)
