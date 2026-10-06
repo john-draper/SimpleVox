@@ -89,7 +89,9 @@ WORD_FAMILY_LEAD_IN_MS = {
     # "fuck", but on Rick and Morty the user clearly hears the original "fuh"
     # onset before the replacement ("fff-(freek)"). R&M's burbled delivery
     # aligns starts late; /f/ is a fricative like /s/. When in doubt, pad.
-    "f": 150,  # fuck, fucking, fucker, ... (audible /f/ onset leak on R&M)
+    # 2026-10-05: 150ms was still not enough for coarticulated runs ("Who in
+    # the-fuck's" - user-reported residual bleed on S03E03 10:59), so 220ms.
+    "f": 220,  # fuck, fucking, fucker, ... (audible /f/ onset leak on R&M)
 }
 
 # Trailing frication ("s" at the end of ass/asses/shits) continues PAST the
