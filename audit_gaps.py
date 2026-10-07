@@ -134,7 +134,7 @@ def main(argv=None) -> int:
                          "profanity (pass-2 era live files are gone); pass --media-root "
                          "explicitly when auditing against censored audio is not wanted")
     ap.add_argument("--min-gap", type=float, default=2.0)
-    ap.add_argument("--max-gap", type=float, default=8.0)
+    ap.add_argument("--max-gap", type=float, default=60.0)
     ap.add_argument("--seasons", default="all", help="comma list of season numbers")
     ap.add_argument("--regions", default="interior",
                     help="comma list: interior,tail,head (default interior)")
