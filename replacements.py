@@ -278,9 +278,9 @@ REPLACEMENTS: dict[str, str] = {
     # --- Whore / slut ---
     "whore": "hussy",
     "whores": "hussies",
-    "slut": "scamp",
-    "sluts": "scamps",
-    "slutty": "scampy",
+    # "slut"/"sluts"/"slutty" REMOVED 2026-10-07 at the owner's request:
+    # slut-family words are deliberately NOT censored. Do not re-add them
+    # (also covers the hyphen per-part fallback - "X-slut" stays unmatched).
 
     # --- Small gaps ---
     "goddamnit": "doggone",
