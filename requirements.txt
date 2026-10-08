@@ -21,3 +21,5 @@ torchaudio>=2.1.0
 # This is the ONLY TTS provider SimpleVox uses — one generic male voice for all
 # replacement words.
 edge-tts>=6.1.0
+# ensemble_audit.py (Parakeet-CTC ear)
+librosa
