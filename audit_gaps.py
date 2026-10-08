@@ -45,7 +45,16 @@ from replacements import find_matches, REPLACEMENTS
 # transcript transcribed from UNCENSORED audio is a swap tell (pass-2
 # transcripts predate most censoring, so a "heck" there can be a swapped
 # "hell"/"fuck").
-EUPHEMISM_RECHECK = {"heck", "darn", "gosh", "dang", "freak", "freaking"}
+EUPHEMISM_RECHECK = {
+    "heck", "hecks", "darn", "darns", "gosh", "dang", "freak", "freaks",
+    "freaking", "freakin", "geez", "cripes",
+    # Added 2026-10-07 after S04E09 17:26 'sinking' (= "f***ing heroes"):
+    # Whisper invents clean-sounding stand-ins; genuine uses are filtered by
+    # the clip listen (clip hears the clean word -> no hit), so
+    # over-listing here is safe.
+    "sinking", "stinking", "flipping", "frick", "frickin", "friggin",
+    "friggen", "doggone", "shoot",
+}
 
 MIN_CLIP_PROB = 0.4   # ignore clip words below this faster-whisper probability
 
