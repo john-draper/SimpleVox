@@ -169,6 +169,13 @@ def main(argv=None) -> int:
     ap.add_argument("out_root")
     ap.add_argument("--detectors", default="whisper,parakeet")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--grid-offset", choices=["zero", "half"], default="zero",
+                    help="half: start each chunk grid at half a chunk - catches "
+                         "words the zero grid suppresses at unlucky boundaries "
+                         "(validated: the 1.5s-overlap grid caught E10 10:00-10:04 "
+                         "that the 3s grid missed on identical audio)")
+    ap.add_argument("--merge", action="store_true",
+                    help="merge into existing <stem>_ens.json instead of skipping")
     ap.add_argument("--seasons", default="all")
     args = ap.parse_args(argv)
 
@@ -191,12 +198,15 @@ def main(argv=None) -> int:
     for i, media in enumerate(videos, 1):
         rel_season = media.parent.name
         dst = out_root / rel_season / f"{media.stem}_ens.json"
-        if dst.is_file():  # resume support
+        if dst.is_file() and not args.merge:  # resume support
             continue
+        prior = []
+        if dst.is_file() and args.merge:
+            prior = json.loads(dst.read_text(encoding="utf-8"))
         dur = ffprobe_duration(media)
-        hits = []
+        hits = list(prior)
         for chunk_s in CHUNK_SIZES:
-            t0 = 0.0
+            t0 = chunk_s / 2.0 if args.grid_offset == "half" else 0.0
             while t0 < dur - 0.5:
                 t1 = min(t0 + chunk_s, dur)
                 wav = extract_clip(media, t0, t1)
