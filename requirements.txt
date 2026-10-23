@@ -10,16 +10,23 @@
 #
 # ffmpeg must also be installed system-wide (see README.md).
 
-# WhisperX: GPU-accelerated transcription with word-level alignment.
-# SimpleVox does NOT use speaker diarization, so no HuggingFace token is needed.
-# On Python 3.13, install >= 3.7.0. If pip fails, install from source:
-#   pip install git+https://github.com/m-bain/whisperX.git
-whisperx>=3.4.0
+# ASR: one model, one pass. faster-whisper emits word-level timestamps itself,
+# so there is no alignment stage and no WhisperX requirement.
+# (WhisperX is NOT installed by this file; the legacy batch_censor.py still
+# imports it, but run.py / batch_videos.py / transcribe.py no longer do.)
+faster-whisper>=1.2.0
 torchaudio>=2.1.0
 
 # edge-tts: free Microsoft Edge neural TTS (no API key, reliable).
 # This is the ONLY TTS provider SimpleVox uses — one generic male voice for all
 # replacement words.
 edge-tts>=6.1.0
-# ensemble_audit.py (Parakeet-CTC ear)
+
+# Second ear (--second-ear / ensemble_audit.py): NVIDIA Parakeet.
+# Parakeet-CTC works with transformers >= 4.57.
+# Parakeet-TDT (preferred: native word timestamps + punctuation) needs
+# transformers >= 5.9 — SimpleVox falls back to CTC automatically when TDT is
+# not importable.
+transformers>=4.57
 librosa
+soundfile

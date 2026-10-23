@@ -6,7 +6,7 @@ profane word with a clean euphemism spoken by a single, generic male voice.
 The video stream is preserved losslessly; only the audio track is edited.
 
 Pipeline (4 stages, no voice cloning, no diarization, no vocal separation):
-    1. Transcribe    (transcribe.py)       — WhisperX word-level timestamps
+    1. Transcribe    (transcribe.py)       — faster-whisper word timestamps
     2. Filter        (replacements.py)     — match profanity -> clean words
     3. Generate      (generate_audio.py)   — single generic male TTS voice
     4. Splice + Mux  (splice_audio.py)     — censored audio + ORIGINAL video
@@ -70,6 +70,12 @@ load_dotenv()
 
 BANNER = "=" * 78
 
+# Seconds of extra audio censored around a second-ear hit. The second model's
+# timestamps are frame-level and can sit a few hundred ms late; widening the
+# window costs a little neighbour audio (acceptable) and never moves the
+# timeline (the replacement fills exactly the window it is given).
+SECOND_EAR_PAD_S = 0.30
+
 
 def log(msg: str = "") -> None:
     print(msg, flush=True)
@@ -91,9 +97,10 @@ def check_tool(name: str) -> bool:
 # Pipeline stages (call into modules directly, not subprocesses)
 # --------------------------------------------------------------------------- #
 
-def stage1_transcribe(video: str, words_json: str, model: str, device: str | None) -> bool:
+def stage1_transcribe(video: str, words_json: str, model: str, device: str | None,
+                      word_pad_ms: int = 50) -> bool:
     banner("[STAGE 1/4] TRANSCRIPTION")
-    log("  WhisperX word-level transcription (no speaker diarization)")
+    log("  faster-whisper word-level transcription (no alignment, no diarization)")
     log(f"  Input:   {video}")
     log(f"  Output:  {words_json}")
     try:
@@ -102,10 +109,10 @@ def stage1_transcribe(video: str, words_json: str, model: str, device: str | Non
             audio_path=video,
             language="en",
             model_name=model,
-            batch_size=8,
             compute_type="auto",
             device=device,
             output_path=words_json,
+            word_pad_ms=word_pad_ms,
         )
     except SystemExit as exc:
         log(str(exc))
@@ -118,6 +125,52 @@ def stage1_transcribe(video: str, words_json: str, model: str, device: str | Non
         log(f"[FAILED] Output JSON not found: {words_json}")
         return False
     log(f"\n  [OK] Stage 1 complete -> {words_json}")
+    return True
+
+
+def stage1b_second_ear(video: str, words_json: str) -> bool:
+    """Optional second detector pass (one extra model, independent bias).
+
+    The primary Whisper pass is biased toward clean text: it deletes or
+    euphemises profanity. A second, architecturally different model catches a
+    different subset of misses. Hits that do not overlap an existing word are
+    appended to the transcription JSON, so every later stage sees them.
+
+    Non-fatal by design: if the second ear cannot load, the pipeline continues
+    with the primary pass alone.
+    """
+    banner("[STAGE 1b] SECOND EAR (independent detector)")
+    try:
+        from ensemble_audit import detect_media, load_second_ear
+        ear = load_second_ear()
+        hits = detect_media(Path(video), [ear])
+
+        with open(words_json, encoding="utf-8") as f:
+            words = json.load(f)
+        known = list(words)
+        added = []
+        for h in hits:
+            # Overlap test on the raw hit: if the primary pass already heard
+            # this occurrence, there is nothing to add.
+            if any(h["start"] < k["end"] - 0.05 and h["end"] > k["start"] + 0.05
+                   for k in known):
+                continue
+            # The second ear's timestamps are coarser than the primary's
+            # (frame-level, can be ~300ms late). Widen the window: over-
+            # censoring a neighbour is acceptable, a leaked onset is not.
+            added.append({"word": h["word"],
+                          "start": max(0.0, float(h["start"]) - SECOND_EAR_PAD_S),
+                          "end": float(h["end"]) + SECOND_EAR_PAD_S})
+
+        if added:
+            words = sorted(words + added, key=lambda w: w["start"])
+            with open(words_json, "w", encoding="utf-8") as f:
+                json.dump(words, f, ensure_ascii=False, indent=2)
+        log(f"\n  [OK] Second ear: {len(hits)} profane hit(s), "
+            f"{len(added)} not already in the primary transcript")
+    except Exception as exc:
+        log(f"\n  [WARN] Second ear unavailable ({type(exc).__name__}: {exc}); "
+            f"continuing with the primary pass only.")
     return True
 
 
@@ -286,6 +339,8 @@ def process_file(
     device: str | None,
     skip_existing: bool,
     lead_in_ms: int | None = None,
+    word_pad_ms: int = 50,
+    second_ear: bool = False,
 ) -> bool:
     """Run the full 4-stage pipeline on a single video file.
 
@@ -329,8 +384,13 @@ def process_file(
     log(f"  Stage 4 -> {final_output}")
 
     # --- Stage 1: Transcription ---
-    if not stage1_transcribe(str(video_path), words_json, model, device):
+    if not stage1_transcribe(str(video_path), words_json, model, device,
+                             word_pad_ms=word_pad_ms):
         return False
+
+    # --- Stage 1b: optional second ear ---
+    if second_ear:
+        stage1b_second_ear(str(video_path), words_json)
 
     # --- Stage 2: Profanity filtering ---
     ok, count = stage2_filter(words_json, replacements_json)
@@ -398,13 +458,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--model",
-        default=os.environ.get("WHISPER_MODEL", "small"),
-        help="Whisper model size (default: small). e.g. medium, large-v3.",
+        default=os.environ.get("WHISPER_MODEL", "large-v3"),
+        help="faster-whisper model (default: large-v3). 'small' is much faster "
+             "but misses profanity.",
     )
     p.add_argument(
         "--device",
         default=None,
-        help="Device for WhisperX (cuda/cpu). Default: auto-detect.",
+        help="Device for faster-whisper (cuda/cpu). Default: auto-detect.",
+    )
+    p.add_argument(
+        "--word-pad-ms",
+        type=int,
+        default=50,
+        help="Widen each censored word span by this much (default: 50ms) to "
+             "cover native word-timestamp imprecision. 0 disables.",
+    )
+    p.add_argument(
+        "--second-ear",
+        action="store_true",
+        help="Run a second, independent detector (NVIDIA Parakeet) after the "
+             "primary pass and add any profanity it hears that Whisper missed. "
+             "Costs a few seconds per file; catches a different subset of misses.",
     )
     p.add_argument(
         "--skip-existing",
@@ -457,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
         log(f"    - {relative_to_root(v, input_root)}")
     log(f"  Voice:       {args.voice}")
     log(f"  Whisper:     {args.model}")
+    log(f"  Second ear:  {'on (Parakeet)' if args.second_ear else 'off'}")
+    log(f"  Word pad:    {args.word_pad_ms}ms")
     log(f"  Skip existing: {'yes' if args.skip_existing else 'no'}")
     log(f"  Continue on error: {'yes' if args.continue_on_error else 'no'}")
     lead_desc = (f"{args.lead_in_ms}ms (all words)" if args.lead_in_ms is not None
@@ -476,6 +553,8 @@ def main(argv: list[str] | None = None) -> int:
                 device=args.device,
                 skip_existing=args.skip_existing,
                 lead_in_ms=args.lead_in_ms,
+                word_pad_ms=args.word_pad_ms,
+                second_ear=args.second_ear,
             )
         except Exception as exc:
             log(f"[FAILED] Unexpected error on {video_path}: "

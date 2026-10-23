@@ -8,15 +8,23 @@ track is edited and re-written. The result is a new video file with the SAME
 video quality and a CENSORED audio track.
 
 Strategy:
-  1. Sort replacements by start time.
-  2. Use ffmpeg to extract each "gap" segment from the original
-     (the audio between consecutive replacement words).
-  3. Build a concat list: [gap_0, replacement_0.wav, gap_1, replacement_1.wav, ...]
-  4. Use ffmpeg's concat demuxer to join all segments into an intermediate
+  1. Decode the source audio ONCE to a PCM WAV and cut every segment from it.
+     Cutting straight out of a compressed track (AAC/AC3) loses one codec
+     frame (1024 samples = 21ms @48k) at the first seek, which shifts the
+     whole timeline ~20ms earlier -- invisible in one pass, but it COMPOUNDS
+     every time a censored file is re-spliced (measured: -20ms/pass, -130ms
+     after 6 generations). PCM cuts are sample-exact (measured: 0ms, and the
+     output duration equals the source to the sample).
+  2. Sort replacements by start time.
+  3. Extract each "gap" segment (the audio between consecutive replacement
+     words) from the PCM source.
+  4. Build a concat list: [gap_0, replacement_0.wav, gap_1, replacement_1.wav, ...]
+  5. Use ffmpeg's concat demuxer to join all segments into an intermediate
      censored-audio WAV.
-  5. Each replacement is time-stretched/trimmed to EXACTLY match the original
+  6. Each replacement is time-stretched/trimmed to EXACTLY match the original
      word's duration so the audio stays in sync with the video.
-  6. Mux the censored audio with the original (losslessly-copied) video stream.
+  7. Mux the censored audio with the original (losslessly-copied) video stream.
+  8. Verify the output audio length against the PCM source and warn on drift.
 
 Requirements:
     - ffmpeg installed system-wide
@@ -173,6 +181,82 @@ def get_audio_duration_seconds(audio_path: str) -> float:
         raise RuntimeError(
             f"Failed to get duration of '{audio_path}' with ffprobe: {exc}"
         ) from exc
+
+
+def decode_source_to_pcm(
+    audio_path: str, pcm_path: str, sample_rate: int, channels: int
+) -> None:
+    """Decode the source audio track once to a PCM WAV for sample-exact cutting.
+
+    Seeking/cutting inside a compressed stream (AAC) costs one codec frame at
+    the first seek, which shifts the concatenated timeline ~20 ms earlier on
+    every pass. Cutting from PCM avoids the seek entirely, so the rebuilt
+    timeline is sample-exact and cannot accumulate drift across re-splices.
+    """
+    layout = "stereo" if channels == 2 else "mono"
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", audio_path,
+        "-vn", "-sn", "-dn",          # audio only: never touch video/subs/data
+        "-acodec", "pcm_s16le",
+        "-ar", str(sample_rate),
+        "-ac", str(channels),
+        "-af", f"aformat=channel_layouts={layout}",
+        pcm_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, result.stdout, result.stderr
+        )
+
+
+def decoded_audio_duration_seconds(audio_path: str, sr: int = 16000) -> float:
+    """Duration of the audio after actually decoding it.
+
+    Container/stream durations for AAC include encoder priming and padding
+    (a few frames, ~20-100ms) that the decoder trims on playback, so they are
+    the wrong reference for a sync check: a perfectly aligned file can report
+    +96ms there. Decoding to raw PCM and counting samples measures what a
+    player will actually hear.
+    """
+    cmd = [
+        "ffmpeg", "-v", "error", "-i", audio_path,
+        "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(sr),
+        "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1",
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed to decode '{audio_path}': "
+            f"{result.stderr.decode('utf-8', 'replace')[:300]}"
+        )
+    return len(result.stdout) / 2.0 / sr
+
+
+def verify_output_duration(
+    output_path: str, expected_duration_s: float, tolerance_s: float = 0.05
+) -> bool:
+    """Compare the finished file's decoded audio length against the PCM source.
+
+    A mismatch beyond `tolerance_s` means the splice timeline drifted and the
+    audio is no longer frame-aligned with the untouched video stream. Warn
+    loudly (do not fail: the file is still usable and the video is intact).
+    """
+    try:
+        actual = decoded_audio_duration_seconds(output_path)
+    except RuntimeError as exc:
+        log(f"[sync] WARNING: could not decode output to verify sync ({exc})")
+        return False
+    delta_ms = (actual - expected_duration_s) * 1000.0
+    if abs(delta_ms) <= tolerance_s * 1000.0:
+        log(f"[sync] OK: output audio {actual:.3f}s vs source "
+            f"{expected_duration_s:.3f}s (delta {delta_ms:+.0f}ms)")
+        return True
+    log(f"[sync] WARNING: output audio {actual:.3f}s vs source "
+        f"{expected_duration_s:.3f}s (delta {delta_ms:+.0f}ms, "
+        f"tolerance {tolerance_s * 1000:.0f}ms) -- A/V may be out of sync")
+    return False
 
 
 def get_audio_properties(audio_path: str) -> dict:
@@ -850,9 +934,23 @@ def splice_audio_ffmpeg(
     try:
         censored_audio_wav = str(temp_dir / "censored_audio.wav")
 
-        # Step 1: Build censored audio (concat gaps + replacements)
+        # Decode the source ONCE to PCM and cut every segment from that copy.
+        # Cutting straight from the compressed track costs one codec frame at
+        # the first seek (~21ms for AAC) and compounds on every re-splice.
+        pcm_source = str(temp_dir / "source_pcm.wav")
+        log("[audio] Decoding source to PCM (one pass; cuts are sample-exact)...")
+        try:
+            decode_source_to_pcm(audio_path, pcm_source, sample_rate, channels)
+        except subprocess.CalledProcessError as exc:
+            log(f"[error] PCM decode failed: "
+                f"{exc.stderr[:300] if exc.stderr else 'unknown'}")
+            return False
+        source_duration = get_audio_duration_seconds(pcm_source)
+        log(f"[audio] PCM source ready: {source_duration:.3f}s")
+
+        # Step 1: Build censored audio (concat gaps + replacements) from PCM
         ok, success_count, skipped_count = build_censored_audio(
-            audio_path=audio_path,
+            audio_path=pcm_source,
             replacements=replacements,
             audio_dir=audio_dir,
             output_wav=censored_audio_wav,
@@ -881,6 +979,9 @@ def splice_audio_ffmpeg(
 
         if not success:
             return False
+
+        # Step 3: Prove the timeline survived the round trip.
+        verify_output_duration(output_path, source_duration)
 
         log(f"[summary] {success_count} replacements spliced, "
             f"{skipped_count} skipped")

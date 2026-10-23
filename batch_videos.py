@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 """
-Batch profanity censor for a folder of VIDEOS with a persistent WhisperX model.
+Batch profanity censor for a folder of VIDEOS with a persistent ASR model.
 
-Identical 4-stage pipeline to run.py, but the WhisperX ASR model and the
-alignment model are loaded ONCE for the whole batch instead of once per file
-(run.py reloads both on every episode, ~15-30s of pure overhead each time —
-prohibitive for a 300+ episode TV library).
+Identical 4-stage pipeline to run.py, but the faster-whisper model is loaded
+ONCE for the whole batch instead of once per file (run.py reloads it on every
+episode, ~10-20s of pure overhead each time — prohibitive for a 300+ episode
+TV library).
 
 Reuses the proven stage modules directly (no re-implementation):
-    1. Transcribe  (whisperx, models cached across files)
+    1. Transcribe  (faster-whisper, model cached across files)
     2. Filter      (replacements.find_matches)
     3. Generate    (generate_audio.process_replacement, edge-tts)
-    4. Splice+Mux  (splice_audio.splice_audio_ffmpeg, per-family lead-in auto)
+    4. Splice+Mux  (splice_audio.splice_audio_ffmpeg, sample-exact PCM cuts)
 
 Resume safety:
     --skip-existing     skip episodes whose final output video already exists
@@ -35,23 +35,9 @@ from pathlib import Path
 from replacements import find_matches
 from generate_audio import process_replacement, format_filename
 from splice_audio import splice_audio_ffmpeg
-from transcribe import select_device
+from transcribe import select_device, VERBATIM_PROMPT
 
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".wmv", ".flv"}
-
-# Passed as faster-whisper's initial_prompt. Whisper has a politeness bias:
-# it sometimes DELETES short profane utterances ("What the fuck?" at S02E07
-# 09:35 never made it into the pass-2 transcript) or swaps in a euphemism
-# ("heck", "f***ing"). The prompt tells it to transcribe verbatim instead.
-# whisperx's FasterWhisperPipeline.transcribe() does NOT forward initial_prompt
-# (silently dropped from asr_options too), so Transcriber below calls the
-# underlying faster-whisper model directly and uses whisperx only for word
-# alignment.
-VERBATIM_PROMPT = (
-    "The following is a verbatim transcript of an uncensored adult animated "
-    "comedy. Profanity is transcribed exactly as spoken: fuck, fucking, shit, "
-    "bitch, asshole."
-)
 
 
 def merge_extra_words(words: list[dict], extra: list[dict]) -> list[dict]:
@@ -82,59 +68,28 @@ def discover_videos(root: Path) -> list[Path]:
 
 
 class Transcriber:
-    """WhisperX ASR + alignment models loaded once, reused for every file."""
+    """faster-whisper model loaded once and reused for every file.
 
-    def __init__(self, model_name: str, device: str | None, batch_size: int):
-        import whisperx
+    One model, one pass: word timestamps come from faster-whisper itself, so
+    there is no alignment model to load or keep in VRAM.
+    """
+
+    def __init__(self, model_name: str, device: str | None, batch_size: int = 0):
+        from transcribe import load_model
 
         if device is None:
             device = select_device()
-        compute_type = "float16" if device == "cuda" else "int8"
-
-        t0 = time.time()
-        log(f"[model] Loading WhisperX '{model_name}' on {device} "
-            f"(compute_type={compute_type})...")
-        self.whisperx = whisperx
-        self.batch_size = batch_size
-        self.device = device
-        self.model = whisperx.load_model(
-            model_name, device, compute_type=compute_type, language="en",
-        )
-        log(f"[model] ASR model loaded in {time.time() - t0:.1f}s")
-
-        t0 = time.time()
-        self.align_model, self.align_metadata = whisperx.load_align_model(
-            language_code="en", device=device,
-        )
-        log(f"[model] alignment model loaded in {time.time() - t0:.1f}s")
+        self.model = load_model(model_name, device, "auto")
 
     def transcribe(self, media_path: Path) -> list[dict]:
-        """Transcribe via faster-whisper (verbatim prompt) + whisperx alignment."""
-        wx = self.whisperx
-        audio = wx.load_audio(str(media_path))
-        fw_segments, _info = self.model.model.transcribe(
-            audio, language="en", beam_size=5, vad_filter=True,
-            initial_prompt=VERBATIM_PROMPT,
-        )
-        segments = [
-            {"start": s.start, "end": s.end, "text": s.text}
-            for s in fw_segments
-        ]
-        result = wx.align(
-            segments, self.align_model, self.align_metadata,
-            audio, self.device, return_char_alignments=False,
-        )
-        words: list[dict] = []
-        for segment in result.get("segments", []):
-            for w in segment.get("words", []) or []:
-                if w.get("start") is None or w.get("end") is None:
-                    continue
-                words.append({
-                    "word": (w.get("word") or "").strip(),
-                    "start": float(w["start"]),
-                    "end": float(w["end"]),
-                })
-        return words
+        from transcribe import (DEFAULT_WORD_PAD_MS, decode_audio_16k,
+                                pad_words, rescan_gaps, transcribe_words)
+
+        audio = decode_audio_16k(media_path)
+        words, _lang = transcribe_words(
+            self.model, audio, language="en", initial_prompt=VERBATIM_PROMPT)
+        words = rescan_gaps(words, audio, self.model)
+        return pad_words(words, DEFAULT_WORD_PAD_MS)
 
 
 def generate_wavs(matches: list[dict], audio_dir: Path, voice: str) -> tuple[int, int]:
@@ -159,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("input_dir")
     p.add_argument("output_dir")
     p.add_argument("--voice", default="en-US-GuyNeural")
-    p.add_argument("--model", default="small")
+    p.add_argument("--model", default="large-v3")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--device", default=None)
     p.add_argument("--limit", type=int, default=None,

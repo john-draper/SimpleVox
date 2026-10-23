@@ -38,7 +38,7 @@ import json
 import sys
 from pathlib import Path
 
-from batch_videos import VERBATIM_PROMPT
+from transcribe import VERBATIM_PROMPT
 from replacements import find_matches, REPLACEMENTS
 
 # Tokens worth re-listening to: our own replacement vocabulary appearing in a

@@ -1,34 +1,57 @@
 #!/usr/bin/env python
 """
-Transcribe a video (or audio) file with WhisperX and export word-level
+Transcribe a video (or audio) file with faster-whisper and export word-level
 timestamps to JSON.
 
-SimpleVox does NOT run speaker diarization — every replacement word is spoken
-by the same generic voice, so speaker labels are unnecessary. This keeps the
-transcription stage simple, fast, and free of any HuggingFace token or
-gated-repo requirements.
+One model, one pass: faster-whisper produces word-level timestamps itself
+(DTW over the decoder's cross-attention), so there is no separate forced-
+alignment stage -- no WhisperX, no wav2vec2, no per-language aligner download.
+SimpleVox also runs no speaker diarization: every replacement word is spoken by
+the same generic voice, so speaker labels are unnecessary.
 
-WhisperX (and ffmpeg underneath it) reads the audio track directly out of any
-common video container (.mkv, .mp4, .m4v, .mov, .avi, .webm, ...), so this stage
-is identical for video as for audio — only the audio is transcribed; the video
+ffmpeg reads the audio track directly out of any common video container (.mkv,
+.mp4, .m4v, .mov, .avi, .webm, ...); only the audio is decoded, the video
 stream is ignored here.
 
 Output JSON is a list of objects:
     {"word": str, "start": float, "end": float}
+
+Word spans are padded symmetrically by --word-pad-ms (default 50ms) and clamped
+so they never overlap a neighbour. The pad covers the boundary imprecision of
+native word timestamps (forced alignment was tighter): a little of the
+neighbouring audio is inside the censored window, which is safe, because the
+replacement always fills exactly the window it is given and the timeline does
+not move.
 
 Designed for an NVIDIA CUDA GPU. Falls back to CPU automatically if CUDA is
 unavailable.
 
 Example:
     python transcribe.py "input/movie.mkv"
-    python transcribe.py input.mkv -o output/words.json --model small
+    python transcribe.py input.mkv -o output/words.json --model large-v3
 """
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Default model. `small` (244M) is fast but misses profanity; `large-v3`
+# catches materially more and still runs comfortably on a modern GPU.
+DEFAULT_MODEL = "large-v3"
+DEFAULT_WORD_PAD_MS = 50
+
+# Passed as faster-whisper's initial_prompt. Whisper has a politeness bias: it
+# sometimes DELETES short profane utterances ("What the fuck?" at S02E07 09:35
+# never made it into one pass's transcript) or swaps in a euphemism ("heck",
+# "f***ing"). The prompt tells it to transcribe verbatim instead.
+VERBATIM_PROMPT = (
+    "The following is a verbatim transcript of an uncensored adult animated "
+    "comedy. Profanity is transcribed exactly as spoken: fuck, fucking, shit, "
+    "bitch, asshole."
+)
 
 
 def log(msg: str) -> None:
@@ -47,6 +70,48 @@ def select_device() -> str:
     except Exception as exc:  # pragma: no cover - torch may not be importable yet
         log(f"[device] Could not query CUDA via torch ({exc}); defaulting to device arg.")
     return "cpu"
+
+
+def decode_audio_16k(audio_path: str | Path) -> "object":
+    """Decode the source's audio track to 16kHz mono float32 (ffmpeg -> numpy).
+
+    Replaces whisperx.load_audio: same output (mono 16k float32 in [-1, 1]),
+    one ffmpeg call, no extra dependency.
+    """
+    import numpy as np
+
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-i", str(audio_path),
+        "-vn", "-sn", "-dn",
+        "-ac", "1", "-ar", "16000",
+        "-f", "s16le", "-acodec", "pcm_s16le",
+        "pipe:1",
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed to decode '{audio_path}': "
+            f"{result.stderr.decode('utf-8', 'replace')[:300]}"
+        )
+    return np.frombuffer(result.stdout, dtype=np.int16).astype("float32") / 32768.0
+
+
+def load_model(model_name: str, device: str, compute_type: str = "auto"):
+    """Load a faster-whisper model (the only ASR model SimpleVox needs)."""
+    from faster_whisper import WhisperModel
+
+    if device == "cuda" and compute_type == "auto":
+        compute_type = "float16"
+    elif device == "cpu" and compute_type == "auto":
+        compute_type = "int8"
+
+    t0 = time.time()
+    log(f"[model] Loading faster-whisper '{model_name}' on {device} "
+        f"(compute_type={compute_type})...")
+    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    log(f"[model] Loaded in {time.time() - t0:.1f}s")
+    return model
 
 
 def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
@@ -145,25 +210,86 @@ def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
     return words
 
 
+def pad_words(words: list[dict], pad_ms: int) -> list[dict]:
+    """Widen each word span by pad_ms/2 on both sides, never overlapping.
+
+    Native word timestamps are looser than forced alignment, and this branch
+    splices exact word spans (no per-family lead-in). The pad buys back the
+    onset/offset precision that alignment used to provide. Widening a window
+    does not move the timeline: the replacement is still stretched to fill
+    exactly the window it is given.
+    """
+    if pad_ms <= 0 or not words:
+        return words
+    half = pad_ms / 2000.0
+    out: list[dict] = []
+    for i, w in enumerate(words):
+        start = max(0.0, float(w["start"]) - half)
+        end = float(w["end"]) + half
+        if out:
+            start = max(start, out[-1]["end"])
+        if i + 1 < len(words):
+            end = min(end, float(words[i + 1]["start"]))
+        out.append({"word": w["word"], "start": start,
+                    "end": max(start + 0.01, end)})
+    return out
+
+
+def transcribe_words(model, audio, language: str | None = None,
+                     vad: bool = True,
+                     initial_prompt: str | None = None) -> tuple[list[dict], str]:
+    """Run one faster-whisper pass and return (words, detected_language)."""
+    t0 = time.time()
+    log(f"[transcribe] Running faster-whisper (VAD {'on' if vad else 'off'})...")
+    segments, info = model.transcribe(
+        audio,
+        language=language,
+        vad_filter=vad,
+        condition_on_previous_text=False,
+        beam_size=5,
+        word_timestamps=True,
+        initial_prompt=initial_prompt,
+    )
+
+    words: list[dict] = []
+    skipped = 0
+    for s in segments:
+        for w in (s.words or []):
+            start, end = w.start, w.end
+            if start is None or end is None:
+                skipped += 1
+                continue
+            token = (w.word or "").strip()
+            if not token:
+                continue
+            words.append({"word": token, "start": float(start),
+                          "end": float(end)})
+
+    detected = info.language or language or "en"
+    log(f"[transcribe] Done in {time.time() - t0:.1f}s "
+        f"(language: {detected}, {len(words)} words)")
+    if skipped:
+        log(f"[words] Skipped {skipped} token(s) with missing timestamps.")
+    return words, detected
+
+
 def transcribe_audio(
     audio_path: str,
     language: str | None,
     model_name: str,
-    batch_size: int,
     compute_type: str,
     device: str | None,
     output_path: str | None,
+    word_pad_ms: int = DEFAULT_WORD_PAD_MS,
+    model=None,
 ) -> list[dict]:
-    """Transcribe audio and return a list of word dicts with timestamps."""
-    import whisperx
-    from faster_whisper import WhisperModel
+    """Transcribe audio and return a list of word dicts with timestamps.
 
+    Pass a preloaded `model` to reuse it across files (batch mode); otherwise
+    one is loaded from `model_name`.
+    """
     if device is None:
         device = select_device()
-
-    # On CUDA, float16 is the recommended/safe default; let users override.
-    if device == "cuda" and compute_type == "auto":
-        compute_type = "float16"
 
     audio_file = Path(audio_path)
     if not audio_file.is_file():
@@ -171,91 +297,24 @@ def transcribe_audio(
 
     log(f"[input] {audio_file}")
 
-    # 1) Load model (faster-whisper directly: its VAD keeps words that
-    #    WhisperX's VAD-batched chunking drops at chunk boundaries).
-    t0 = time.time()
-    log(f"[model] Loading faster-whisper model '{model_name}' on {device} "
-        f"(compute_type={compute_type})...")
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
-    log(f"[model] Loaded in {time.time() - t0:.1f}s")
+    if model is None:
+        model = load_model(model_name, device, compute_type)
 
-    # 2) Load audio (decoded via ffmpeg -> mono 16kHz float32 numpy array).
-    #    ffmpeg auto-selects the audio track from a video container.
     t0 = time.time()
     log("[audio] Decoding audio track with ffmpeg "
         "(this may take a moment for long files)...")
-    audio = whisperx.load_audio(str(audio_file))
+    audio = decode_audio_16k(audio_file)
     log(f"[audio] Decoded in {time.time() - t0:.1f}s "
         f"({audio.shape[0] / 16000 / 60:.1f} min of audio)")
 
-    # 3) Transcribe with faster-whisper's VAD (no external chunk batching).
-    t0 = time.time()
-    log("[transcribe] Running faster-whisper transcription (VAD on)...")
-    segments, info = model.transcribe(
-        audio,
-        language=language,
-        vad_filter=True,
-        condition_on_previous_text=False,
-        beam_size=5,
-    )
-    seg_list = [
-        {"start": float(s.start), "end": float(s.end), "text": s.text}
-        for s in segments
-    ]
-    detected_language = info.language or language or "en"
-    log(f"[transcribe] Done in {time.time() - t0:.1f}s "
-        f"(detected/forced language: {detected_language}, {len(seg_list)} segments)")
+    words, _lang = transcribe_words(model, audio, language=language)
 
-    # 4) Align for accurate word-level timestamps
-    t0 = time.time()
-    log(f"[align] Loading alignment model for language '{detected_language}'...")
-    try:
-        model_a, metadata = whisperx.load_align_model(
-            language_code=detected_language,
-            device=device,
-        )
-    except ValueError as exc:
-        # Language not supported by the default alignment model.
-        raise SystemExit(
-            f"[align] No alignment model for language '{detected_language}' ({exc}). "
-            "Try --language en or a different alignment model."
-        ) from exc
-
-    log("[align] Aligning word timestamps...")
-    result = whisperx.align(
-        seg_list,
-        model_a,
-        metadata,
-        audio,
-        device,
-        return_char_alignments=False,
-    )
-    log(f"[align] Done in {time.time() - t0:.1f}s")
-
-    # 5) Flatten segment word lists into [{word, start, end}, ...]
-    #    (No diarization — SimpleVox uses one voice for all words.)
-    words: list[dict] = []
-    skipped = 0
-    for segment in result.get("segments", []):
-        for w in segment.get("words", []) or []:
-            start = w.get("start")
-            end = w.get("end")
-            if start is None or end is None:
-                skipped += 1
-                continue
-            words.append({
-                "word": (w.get("word") or "").strip(),
-                "start": float(start),
-                "end": float(end),
-            })
-
-    if skipped:
-        log(f"[words] Skipped {skipped} token(s) with missing timestamps.")
-
-    # 5b) Recover words dropped at VAD boundaries (whole-word misses).
+    # Recover words dropped at VAD boundaries (whole-word misses).
     words = rescan_gaps(words, audio, model)
 
-    # 6) Write JSON
+    # Widen spans so native timestamps don't leak word onsets/offsets.
+    words = pad_words(words, word_pad_ms)
+
     if output_path is None:
         output_path = str(audio_file.with_suffix(".json"))
     out_path = Path(output_path)
@@ -273,8 +332,8 @@ def transcribe_audio(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Transcribe a video/audio file with WhisperX and export "
-                    "word-level JSON timestamps.",
+        description="Transcribe a video/audio file with faster-whisper and "
+                    "export word-level JSON timestamps (no alignment stage).",
     )
     p.add_argument(
         "audio",
@@ -292,20 +351,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--model",
-        default="small",
-        help="Whisper model size/name (default: small). e.g. medium, large-v3.",
+        default=DEFAULT_MODEL,
+        help=f"faster-whisper model name (default: {DEFAULT_MODEL}).",
+    )
+    p.add_argument(
+        "--word-pad-ms",
+        type=int,
+        default=DEFAULT_WORD_PAD_MS,
+        help=f"Widen each word span by this much (default: {DEFAULT_WORD_PAD_MS}ms) "
+             "to cover native-timestamp imprecision. 0 disables.",
     )
     p.add_argument(
         "--batch-size",
         type=int,
-        default=8,
-        help="VAD batch size for transcription (default: 8). Lower if you hit CUDA OOM.",
+        default=None,
+        help="Deprecated / ignored (kept so old command lines still parse).",
     )
     p.add_argument(
         "--compute-type",
         default="auto",
-        help="ctranslate2 compute type (default: auto -> float16 on CUDA). "
-             "Try 'int8' to cut VRAM usage if you run out of memory.",
+        help="ctranslate2 compute type (default: auto -> float16 on CUDA, "
+             "int8 on CPU). Try 'int8' to cut VRAM usage.",
     )
     p.add_argument(
         "--device",
@@ -325,10 +391,10 @@ def main(argv: list[str] | None = None) -> int:
             audio_path=args.audio,
             language=args.language,
             model_name=args.model,
-            batch_size=args.batch_size,
             compute_type=args.compute_type,
             device=args.device,
             output_path=args.output,
+            word_pad_ms=args.word_pad_ms,
         )
     except FileNotFoundError as exc:
         log(f"[error] {exc}")

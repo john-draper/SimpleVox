@@ -3,6 +3,13 @@
 Batch profanity censor for a folder of audio clips (e.g. dialogue extracted
 from a game's audio archives).
 
+LEGACY PATH: this tool still uses WhisperX (ASR + alignment model). The main
+video pipeline (run.py, batch_videos.py, transcribe.py) moved to a single
+faster-whisper pass and no longer needs WhisperX. Keeping this file working
+means installing whisperx separately:
+    pip install whisperx
+Nothing else in the project imports it.
+
 This is the RDR2-scale companion to run.py. run.py reloads the WhisperX model
 on EVERY file, which is fine for a handful of videos but prohibitive for the
 thousands of short clips that come out of a game's audio archives (each model

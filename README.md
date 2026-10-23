@@ -13,7 +13,7 @@ SimpleVox uses a **single generic male voice** for every replacement word, power
 - **Fast** — transcription runs directly on the source audio with no extra preprocessing.
 
 ```
-video.mkv ──▶ [1. Transcribe] ──▶ words.json      (WhisperX word timestamps)
+video.mkv ──▶ [1. Transcribe] ──▶ words.json      (faster-whisper word timestamps)
                     │
                     ▼
             [2. Find Replacements] ──▶ replacements.json   (profane -> clean)
@@ -85,8 +85,14 @@ python run.py "input/Season 1"
 # Choose a different generic voice:
 python run.py "input/movie.mkv" --voice en-US-DavisNeural
 
-# Use a more accurate (slower) Whisper model:
+# Use a more accurate (slower) faster-whisper model:
 python run.py "input/movie.mkv" --model large-v3
+
+# Add a second, independent detector (NVIDIA Parakeet) for extra recall:
+python run.py "input/movie.mkv" --second-ear
+
+# Widen each censored word window (default 50ms; 0 disables):
+python run.py "input/movie.mkv" --word-pad-ms 80
 
 # Skip videos that already have an output file:
 python run.py --skip-existing
@@ -127,7 +133,7 @@ output/
 
 ### Stage 1: Transcription (`transcribe.py`)
 
-Transcribes the audio track of the video with WhisperX for word-level timestamps. **No speaker diarization** is run (SimpleVox uses one voice for everything, so speaker labels aren't needed).
+Transcribes the audio track with **faster-whisper** for word-level timestamps. One model, one pass: faster-whisper produces the word timings itself, so there is no separate forced-alignment stage (no WhisperX, no wav2vec2 aligner to download). **No speaker diarization** is run (SimpleVox uses one voice for everything, so speaker labels aren't needed).
 
 ```bash
 python transcribe.py "input/video.mkv" -o output/words.json
@@ -136,7 +142,7 @@ python transcribe.py "input/video.mkv" -o output/words.json
 | Option | Default | Notes |
 |--------|---------|-------|
 | `-o PATH` | `<input>.json` | Output JSON path |
-| `--model NAME` | `small` | Whisper model |
+| `--model NAME` | `large-v3` | faster-whisper model |
 | `--device D` | auto | `cuda` or `cpu` |
 | `--compute-type T` | auto | `float16`/`int8` |
 | `--language CODE` | `en` | language code, or `auto` |
@@ -179,6 +185,14 @@ python splice_audio.py "input/video.mkv" \
 
 If ffmpeg can't stream-copy the video, set `VIDEO_REENCODE=1` to re-encode.
 
+**A/V sync is exact and self-checking.** The source audio is decoded once to PCM
+and every segment is cut from that copy, so cuts are sample-exact. (Cutting
+straight out of AAC lost one codec frame ~21 ms at the first seek, which shifted
+the whole timeline earlier on every pass — harmless once, but re-splicing a
+censored file compounded it: −130 ms after six generations.) Each run now ends
+with a `[sync] OK` line comparing the finished file's decoded audio length
+against the source; anything beyond 50 ms is reported as a warning.
+
 ---
 
 ## Choosing a Voice
@@ -202,17 +216,29 @@ Pass any of these with `--voice`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHISPER_DEVICE` | `cuda` | `cuda` or `cpu` |
-| `WHISPER_MODEL` | `small` | Whisper model size |
+| `WHISPER_MODEL` | `large-v3` | faster-whisper model |
 | `VIDEO_REENCODE` | `0` | Set to `1` to re-encode video |
 
 ---
 
 ## Troubleshooting
 
-- **Audio out of sync** — SimpleVox time-stretches each replacement to exactly match the original word's duration. If you still see drift, ensure you're using the latest `splice_audio.py`.
+- **Audio out of sync** — SimpleVox cut segments straight from the compressed source, which lost one codec frame (~21 ms) per run and compounded when a censored file was re-spliced. It now cuts from a decoded PCM copy and every run prints `[sync] OK ... (delta +0ms)`; if that line warns instead, the file needs re-splicing rather than a timing tweak. Older outputs that were censored repeatedly may still carry a small constant lead.
 - **CUDA crashes / cuDNN errors** — Install cuDNN 8 DLLs (`pip install nvidia-cudnn-cu11==8.9.4.25`) and copy them to your `torch/lib/` folder. Or fall back to CPU with `--device cpu`.
 - **FFmpeg not found** — `winget install Gyan.FFmpeg`, then reopen your terminal.
 - **edge-tts returns tiny/empty audio** — This is usually a transient network issue; rerun. The stage skips already-generated files with `--skip-existing`.
+
+## Tests
+
+```bash
+python test_replacements.py     # profanity dictionary + matcher regressions
+python tests/test_sync.py       # A/V sync: repeated re-splices must stay at 0ms
+```
+
+`tests/test_sync.py` builds a synthetic clip with sharp clicks, censors it,
+then re-splices the output several times (as happens across censor passes) and
+asserts every click kept its original timestamp. Run it after any change to
+`splice_audio.py`.
 
 ## License
 

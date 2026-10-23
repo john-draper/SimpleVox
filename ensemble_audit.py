@@ -12,27 +12,29 @@ by ALL detectors:
 
   * whisper-medium + VERBATIM_PROMPT (best single catcher; the prompt tips
     it toward verbatim) - word timestamps from faster-whisper
-  * parakeet-ctc-0.6b (independent bias; catches clear-dialogue profanity
-    Whisper buries) - token timestamps from CTC frame alignment
+  * NVIDIA Parakeet, a different architecture with an independent bias:
+      - parakeet-tdt-0.6b-v3 (preferred; native word timestamps, punctuation,
+        needs transformers >= 5.9)
+      - parakeet-ctc-0.6b (fallback; CTC frame alignment, no punctuation)
 
 Union of profane tokens is written per episode as Season N/<stem>_ens.json:
 [{"word","start","end","detector"}]. Downstream post-processing (cluster
-merge, applied-window filter, dictionary replacement) is a separate step -
-see _ens_post.py.
+merge, applied-window filter, dictionary replacement) is a separate step.
+
+`detect_media()` is also used by run.py's optional --second-ear stage, which
+appends the second ear's finds to the primary transcript.
 
 Usage:
   python ensemble_audit.py "E:\Videos\TVShows\Rick and Morty (2013)" "E:\...\RnM_ens\_intermediate" [--limit N] [--detectors whisper,parakeet]
 """
 import argparse
 import json
-import re
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from batch_videos import VERBATIM_PROMPT
+from transcribe import VERBATIM_PROMPT
 from replacements import find_matches
 
 # Multi-scale validated 2026-10-08 on known-raw spots: no single window size
@@ -45,6 +47,8 @@ MIN_PROB = 0.4
 
 
 def ffprobe_duration(path: Path) -> float:
+    import subprocess
+
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
@@ -53,6 +57,8 @@ def ffprobe_duration(path: Path) -> float:
 
 
 def extract_clip(media: Path, t0: float, t1: float) -> Path:
+    import subprocess
+
     tf = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tf.close()
     subprocess.run(
@@ -87,15 +93,21 @@ class WhisperEar:
         return out
 
 
-class ParakeetEar:
+class ParakeetCTCEar:
     """Parakeet-CTC, unprompted (its value IS its different bias).
     Token timestamps from CTC frame alignment (stride = chunk_len / frames)."""
 
     name = "parakeet"
 
     def __init__(self, model_id: str = "nvidia/parakeet-ctc-0.6b"):
+        import contextlib
+        import io
+
         import torch
-        from transformers import AutoProcessor, ParakeetForCTC
+        # transformers 4.57 prints an emoji "Config not found" banner while
+        # building this class's docstring; swallow it, it is noise.
+        with contextlib.redirect_stdout(io.StringIO()):
+            from transformers import AutoProcessor, ParakeetForCTC
         self.torch = torch
         self.proc = AutoProcessor.from_pretrained(model_id)
         self.model = ParakeetForCTC.from_pretrained(
@@ -123,13 +135,19 @@ class ParakeetEar:
                 f0 = f
                 if f < len(ids):
                     prev = ids[f]
-        # sentencepiece pieces -> words: pieces starting with '▁' begin a word
+        # sentencepiece pieces -> words: pieces starting with '▁' begin a word.
+        # convert_ids_to_tokens keeps the '▁' marker; tokenizer.decode() strips
+        # it, which would glue a whole chunk into one giant "word".
         words = []
         cur, fs, fe = [], None, None
         for tid, a, b in tokens:
-            piece = self.proc.tokenizer.decode([tid])
+            piece = self.proc.tokenizer.convert_ids_to_tokens(tid)
+            if isinstance(piece, bytes):
+                piece = piece.decode("utf-8", "replace")
             if piece is None:
                 continue
+            if piece.startswith("<") and piece.endswith(">"):
+                continue  # <unk>/<blank>/<pad> -- not speech
             starts_word = piece.startswith("\u2581") or piece.startswith(" ")
             text = piece.replace("\u2581", "").strip()
             if not text:
@@ -147,6 +165,115 @@ class ParakeetEar:
                  "end": offset + (b + 1) * stride} for w, a, b in words]
 
 
+class ParakeetTDTEar:
+    """Parakeet-TDT: same family, newer decoder, native word timestamps.
+
+    Preferred over CTC when the installed transformers has AutoModelForTDT
+    (parakeet TDT support landed in transformers 5.9). Timestamps come from
+    the TDT decoder's durations, so no frame-stride arithmetic is needed.
+    """
+
+    name = "parakeet"
+
+    def __init__(self, model_id: str = "nvidia/parakeet-tdt-0.6b-v3"):
+        import contextlib
+        import io
+
+        import torch
+        with contextlib.redirect_stdout(io.StringIO()):
+            from transformers import AutoModelForTDT, AutoProcessor
+        self.torch = torch
+        self.proc = AutoProcessor.from_pretrained(model_id)
+        self.model = AutoModelForTDT.from_pretrained(
+            model_id, dtype=torch.bfloat16).cuda().eval()
+
+    def _decode(self, out):
+        return self.proc.decode(out.sequences,
+                                durations=getattr(out, "durations", None),
+                                skip_special_tokens=True)
+
+    @staticmethod
+    def _merge(tokens):
+        """Merge token-level (text, start, end) into word-level spans."""
+        words = []
+        cur, ws, we = [], None, None
+        for text, start, end in tokens:
+            piece = (text or "").replace("\u2581", " ").strip()
+            if not piece:
+                continue
+            starts_word = (text or "").startswith(("\u2581", " "))
+            if starts_word and cur:
+                words.append(("".join(cur), ws, we))
+                cur, ws = [], None
+            if ws is None:
+                ws = start
+            cur.append(piece)
+            we = end
+        if cur:
+            words.append(("".join(cur), ws, we))
+        return words
+
+    def hear(self, wav: Path, offset: float) -> list[dict]:
+        import soundfile as sf
+        data, sr = sf.read(str(wav))
+        inputs = self.proc(data, sampling_rate=16000, return_tensors="pt").to("cuda")
+        inputs = {k: (v.to(self.torch.bfloat16) if v.is_floating_point() else v)
+                  for k, v in inputs.items()}
+        with self.torch.no_grad():
+            out = self.model.generate(**inputs, return_dict_in_generate=True)
+
+        decoded = self._decode(out)
+        if isinstance(decoded, tuple):
+            _text, stamps = decoded
+        else:
+            stamps = None
+        if not stamps:
+            return []
+
+        tokens = []
+        for item in stamps:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("token") or ""
+                start, end = item.get("start"), item.get("end")
+            else:  # object with attributes
+                text = getattr(item, "text", "") or getattr(item, "token", "")
+                start, end = getattr(item, "start", None), getattr(item, "end", None)
+            if start is None or end is None:
+                continue
+            tokens.append((text, float(start), float(end)))
+
+        return [{"word": w, "start": offset + s, "end": offset + e}
+                for w, s, e in self._merge(tokens)]
+
+
+def load_second_ear(prefer: str = "auto"):
+    """Load the second ear, preferring TDT and falling back to CTC.
+
+    Returns a cached instance so batch runs load the model once.
+    """
+    global _EAR
+    if _EAR is not None:
+        return _EAR
+
+    if prefer in ("auto", "tdt"):
+        try:
+            _EAR = ParakeetTDTEar()
+            print(f"[ear] {_EAR.name} (TDT) loaded", flush=True)
+            return _EAR
+        except Exception as exc:
+            if prefer == "tdt":
+                raise
+            print(f"[ear] TDT unavailable ({type(exc).__name__}: {exc}); "
+                  f"falling back to Parakeet-CTC", flush=True)
+
+    _EAR = ParakeetCTCEar()
+    print(f"[ear] {_EAR.name} (CTC) loaded", flush=True)
+    return _EAR
+
+
+_EAR = None
+
+
 def profane(entry: dict) -> bool:
     return bool(find_matches([entry]))
 
@@ -161,6 +288,27 @@ def dedupe(hits: list[dict]) -> list[dict]:
             continue
         out.append(h)
     return sorted(out, key=lambda h: h["start"])
+
+
+def detect_media(media: Path, ears, chunk_sizes=None, progress: bool = False) -> list[dict]:
+    """Run every ear over every chunk of `media`; return deduped profane hits."""
+    chunk_sizes = chunk_sizes or CHUNK_SIZES
+    dur = ffprobe_duration(media)
+    hits: list[dict] = []
+    for chunk_s in chunk_sizes:
+        t0 = 0.0
+        while t0 < dur - 0.5:
+            t1 = min(t0 + chunk_s, dur)
+            wav = extract_clip(media, t0, t1)
+            try:
+                for ear in ears:
+                    for w in ear.hear(wav, offset=t0):
+                        if profane(w):
+                            hits.append({**w, "detector": ear.name})
+            finally:
+                wav.unlink(missing_ok=True)
+            t0 += chunk_s - OVERLAP_S
+    return dedupe(hits)
 
 
 def main(argv=None) -> int:
@@ -183,7 +331,11 @@ def main(argv=None) -> int:
     out_root = Path(args.out_root)
     ears = []
     for name in args.detectors.split(","):
-        ears.append(WhisperEar() if name.strip() == "whisper" else ParakeetEar())
+        name = name.strip()
+        if name == "whisper":
+            ears.append(WhisperEar())
+        else:
+            ears.append(load_second_ear())
         print(f"[ear] {ears[-1].name} loaded", flush=True)
 
     seasons = None if args.seasons == "all" else {f"Season {s}" for s in args.seasons.split(",")}
@@ -203,21 +355,7 @@ def main(argv=None) -> int:
         prior = []
         if dst.is_file() and args.merge:
             prior = json.loads(dst.read_text(encoding="utf-8"))
-        dur = ffprobe_duration(media)
-        hits = list(prior)
-        for chunk_s in CHUNK_SIZES:
-            t0 = chunk_s / 2.0 if args.grid_offset == "half" else 0.0
-            while t0 < dur - 0.5:
-                t1 = min(t0 + chunk_s, dur)
-                wav = extract_clip(media, t0, t1)
-                try:
-                    for ear in ears:
-                        for w in ear.hear(wav, offset=t0):
-                            if profane(w):
-                                hits.append({**w, "detector": ear.name})
-                finally:
-                    wav.unlink(missing_ok=True)
-                t0 += chunk_s - OVERLAP_S
+        hits = list(prior) + detect_media(media, ears)
         hits = dedupe(hits)
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(json.dumps(hits, ensure_ascii=False, indent=2),
