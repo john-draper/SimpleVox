@@ -83,15 +83,10 @@ MIN_GAIN_DB = -12.0  # safety clamp to prevent excessive attenuation
 #     through 50ms AND 150ms on S01E01 'ass' (faint "Aa" + trailing "s").
 #     Recalibrated empirically: A=220ms, S=150ms lead-in.
 WORD_FAMILY_LEAD_IN_MS = {
-    "a": 220,  # ass, asshole, asses, ... (vowel onset leaks far past 150ms in music-heavy mixes)
-    "s": 150,  # shit, shithead, shits, ... (fricative "sh" onset leaks past 50ms)
-    # Added 2026-10-04: the FG calibration measured 0ms leak for stop-initial
-    # "fuck", but on Rick and Morty the user clearly hears the original "fuh"
-    # onset before the replacement ("fff-(freek)"). R&M's burbled delivery
-    # aligns starts late; /f/ is a fricative like /s/. When in doubt, pad.
-    # 2026-10-05: 150ms was still not enough for coarticulated runs ("Who in
-    # the-fuck's" - user-reported residual bleed on S03E03 10:59), so 220ms.
-    "f": 220,  # fuck, fucking, fucker, ... (audible /f/ onset leak on R&M)
+    # SIMPLE BASELINE (branch `simple`): no lead-in padding.
+    # Each replacement occupies exactly the word's [start, end] span, exactly
+    # like the original SimpleVox design. No neighbouring audio is swallowed,
+    # so A/V timing stays exact.
 }
 
 # Trailing frication ("s" at the end of ass/asses/shits) continues PAST the
@@ -100,8 +95,8 @@ WORD_FAMILY_LEAD_IN_MS = {
 # from -50ms BEFORE the reported end to +165-170ms AFTER it. So words ending
 # in "s" get a 200ms tail (measured 170ms + margin); other endings get 60ms.
 # Keyed on the word's LAST letter, applied only to the a/s families.
-TAIL_FRICATIVE_MS = 200   # word ends in "s" (ass, asses, shits, shitsnacks...)
-TAIL_OTHER_MS = 60        # any other ending (asshole, shit's abrupt /t/, ...)
+TAIL_FRICATIVE_MS = 0    # SIMPLE BASELINE: no tail-out padding
+TAIL_OTHER_MS = 0        # SIMPLE BASELINE: no tail-out padding
 
 # Of the lead-in, only this much is pure silence; the replacement itself is
 # stretched to start earlier and fill the rest (user preference: the word
@@ -661,6 +656,7 @@ def mux_video_audio(
         "-i", censored_audio,
         "-map", "0:v:0",     # video from original
         "-map", "1:a:0",     # audio from censored track
+        "-map", "0:s?",      # keep any embedded subtitle tracks
     ]
 
     if reencode_video:
@@ -674,7 +670,7 @@ def mux_video_audio(
     cmd += [
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",  # stop at the shorter stream (audio matches video length)
+        "-c:s", "copy",     # subtitles copied, not re-encoded
     ]
 
     # Preserve metadata/subtitles/chapters from the original where possible
