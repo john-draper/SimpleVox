@@ -49,6 +49,102 @@ def select_device() -> str:
     return "cpu"
 
 
+def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
+                min_gap: float = 0.7, max_gap: float = 15.0) -> list[dict]:
+    """Re-transcribe short silent gaps between words and recover dropped words.
+
+    Whisper's VAD drops a word entirely at some chunk boundaries: the word is
+    never in the transcript, so the dictionary can never censor it. This pass
+    looks at every pause between consecutive words that still contains speech
+    energy, transcribes just that window without VAD, and adds any profanity
+    the first pass missed.
+
+    Only dictionary-matching words are added, so music/ambience in a gap can
+    never inject arbitrary text into the transcript.
+    """
+    import numpy as np
+    from replacements import find_matches
+
+    if not words:
+        return words
+
+    frame = 0.02
+    n = int(sr * frame)
+    usable = (len(audio) // n) * n
+    if usable < n * 10:
+        return words
+    frames = audio[:usable].reshape(-1, n).astype("float32")
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+
+    idx = []
+    for w in words:
+        a, b = int(w["start"] / frame), int(w["end"] / frame)
+        idx.extend(range(max(0, a), min(len(rms), b)))
+    ref = float(np.median(rms[idx])) if idx else 0.0
+    thresh = max(ref * 0.35, 1e-4)
+
+    bounds = [(0.0, words[0]["start"])]
+    bounds += [(words[i]["end"], words[i + 1]["start"]) for i in range(len(words) - 1)]
+    bounds += [(words[-1]["end"], len(audio) / sr)]
+
+    added: list[dict] = []
+    checked = 0
+    for g0, g1 in bounds:
+        if not (min_gap <= (g1 - g0) <= max_gap):
+            continue
+        seg = rms[int(g0 / frame):int(g1 / frame)]
+        if seg.size == 0 or int((seg > thresh).sum()) < 6:  # <120 ms of sound
+            continue
+        checked += 1
+        off = max(0.0, g0 - 0.20)
+        end = min(len(audio) / sr, g1 + 0.20)
+        clip = audio[int(off * sr):int(end * sr)]
+        try:
+            segs, _ = model.transcribe(
+                clip, language="en", vad_filter=False, word_timestamps=True,
+                condition_on_previous_text=False, beam_size=5,
+            )
+            found = []
+            for s in segs:
+                for w in (s.words or []):
+                    found.append({"word": (w.word or "").strip(),
+                                  "start": off + float(w.start),
+                                  "end": off + float(w.end)})
+        except Exception:
+            continue
+        known = words + added
+        for m in find_matches(found):
+            if any(m["start"] < k["end"] - 0.05 and m["end"] > k["start"] + 0.05
+                   for k in known):
+                continue
+            added.append({"word": m["word"], "start": m["start"], "end": m["end"]})
+
+    if added:
+        log(f"[rescan] Recovered {len(added)} missed profane word(s) from "
+            f"{checked} gap(s): "
+            + ", ".join(f"{a['word']}@{a['start']:.1f}s" for a in added[:8]))
+        words = sorted(words + added, key=lambda w: w["start"])
+        # The same utterance can appear in both passes with slightly different
+        # timings (e.g. "FUCK" 720.9-721.3 and "Fuck" 721.34-721.58). Collapse
+        # adjacent words with the same stem so one word is never censored twice.
+        import string
+
+        def stem(w):
+            return w.strip().strip(string.punctuation).lower()
+
+        merged = []
+        for w in words:
+            if (merged and stem(merged[-1]["word"]) == stem(w["word"])
+                    and (w["start"] - merged[-1]["end"]) < 0.15):
+                merged[-1]["end"] = max(merged[-1]["end"], w["end"])
+                continue
+            merged.append(dict(w))
+        words = merged
+    else:
+        log(f"[rescan] Checked {checked} gap(s); nothing missed.")
+    return words
+
+
 def transcribe_audio(
     audio_path: str,
     language: str | None,
@@ -60,6 +156,7 @@ def transcribe_audio(
 ) -> list[dict]:
     """Transcribe audio and return a list of word dicts with timestamps."""
     import whisperx
+    from faster_whisper import WhisperModel
 
     if device is None:
         device = select_device()
@@ -74,16 +171,12 @@ def transcribe_audio(
 
     log(f"[input] {audio_file}")
 
-    # 1) Load model
+    # 1) Load model (faster-whisper directly: its VAD keeps words that
+    #    WhisperX's VAD-batched chunking drops at chunk boundaries).
     t0 = time.time()
-    log(f"[model] Loading WhisperX model '{model_name}' on {device} "
+    log(f"[model] Loading faster-whisper model '{model_name}' on {device} "
         f"(compute_type={compute_type})...")
-    model = whisperx.load_model(
-        model_name,
-        device,
-        compute_type=compute_type,
-        language=language,
-    )
+    model = WhisperModel(model_name, device=device, compute_type=compute_type)
     log(f"[model] Loaded in {time.time() - t0:.1f}s")
 
     # 2) Load audio (decoded via ffmpeg -> mono 16kHz float32 numpy array).
@@ -95,17 +188,23 @@ def transcribe_audio(
     log(f"[audio] Decoded in {time.time() - t0:.1f}s "
         f"({audio.shape[0] / 16000 / 60:.1f} min of audio)")
 
-    # 3) Transcribe
+    # 3) Transcribe with faster-whisper's VAD (no external chunk batching).
     t0 = time.time()
-    log("[transcribe] Running transcription (VAD-batched)...")
-    result = model.transcribe(
+    log("[transcribe] Running faster-whisper transcription (VAD on)...")
+    segments, info = model.transcribe(
         audio,
-        batch_size=batch_size,
         language=language,
+        vad_filter=True,
+        condition_on_previous_text=False,
+        beam_size=5,
     )
-    detected_language = result.get("language", language or "en")
+    seg_list = [
+        {"start": float(s.start), "end": float(s.end), "text": s.text}
+        for s in segments
+    ]
+    detected_language = info.language or language or "en"
     log(f"[transcribe] Done in {time.time() - t0:.1f}s "
-        f"(detected/forced language: {detected_language})")
+        f"(detected/forced language: {detected_language}, {len(seg_list)} segments)")
 
     # 4) Align for accurate word-level timestamps
     t0 = time.time()
@@ -124,7 +223,7 @@ def transcribe_audio(
 
     log("[align] Aligning word timestamps...")
     result = whisperx.align(
-        result["segments"],
+        seg_list,
         model_a,
         metadata,
         audio,
@@ -152,6 +251,9 @@ def transcribe_audio(
 
     if skipped:
         log(f"[words] Skipped {skipped} token(s) with missing timestamps.")
+
+    # 5b) Recover words dropped at VAD boundaries (whole-word misses).
+    words = rescan_gaps(words, audio, model)
 
     # 6) Write JSON
     if output_path is None:
