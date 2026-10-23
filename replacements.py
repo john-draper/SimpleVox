@@ -387,4 +387,17 @@ def find_matches(words: list[dict]) -> list[dict]:
                 "end": float(entry["end"]),
                 "replacement": replacement,
             })
-    return matches
+
+    # Merge near-duplicate detections of the same word. Whisper occasionally
+    # emits one utterance twice at a segment boundary (e.g. "shit." ending one
+    # segment and "shit!" starting the next 0.2s later); without this the
+    # splicer would speak the replacement twice ("crap crap"). Genuine rapid
+    # repetition is rare and a merged span still covers both utterances.
+    merged: list[dict] = []
+    for m in sorted(matches, key=lambda x: x["start"]):
+        if (merged and m["replacement"] == merged[-1]["replacement"]
+                and (m["start"] - merged[-1]["end"]) < 0.25):
+            merged[-1]["end"] = max(merged[-1]["end"], m["end"])
+            continue
+        merged.append(m)
+    return merged
