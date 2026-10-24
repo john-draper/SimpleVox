@@ -152,11 +152,25 @@ def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
     bounds += [(words[i]["end"], words[i + 1]["start"]) for i in range(len(words) - 1)]
     bounds += [(words[-1]["end"], len(audio) / sr)]
 
+    # VAD can drop a long stretch, not just a single word (seen: 51 s in an
+    # Outer Banks episode). Split any gap longer than max_gap into overlapping
+    # windows so those stretches are re-listened to as well.
+    spans: list[tuple[float, float]] = []
+    for g0, g1 in bounds:
+        if (g1 - g0) < min_gap:
+            continue
+        if (g1 - g0) <= max_gap:
+            spans.append((g0, g1))
+            continue
+        win, step = 18.0, 16.0
+        t = g0
+        while t < g1 - min_gap:
+            spans.append((t, min(t + win, g1)))
+            t += step
+
     added: list[dict] = []
     checked = 0
-    for g0, g1 in bounds:
-        if not (min_gap <= (g1 - g0) <= max_gap):
-            continue
+    for g0, g1 in spans[:60]:
         seg = rms[int(g0 / frame):int(g1 / frame)]
         if seg.size == 0 or int((seg > thresh).sum()) < 6:  # <120 ms of sound
             continue
@@ -172,6 +186,8 @@ def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
             found = []
             for s in segs:
                 for w in (s.words or []):
+                    if float(getattr(w, "probability", 1.0)) < 0.45:
+                        continue
                     found.append({"word": (w.word or "").strip(),
                                   "start": off + float(w.start),
                                   "end": off + float(w.end)})
