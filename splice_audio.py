@@ -578,7 +578,7 @@ def build_censored_audio(
         filename = format_filename(start_ms, end_ms, replacement)
         wav_path = audio_dir / filename
 
-        if end_ms < start_ms + MIN_REPLACEMENT_MS:
+        if end_ms <= start_ms:
             # faster-whisper occasionally reports a word with start == end. A
             # zero-length target would skip the duration guards below and dump
             # the TTS file at its natural length, growing the timeline and
@@ -1013,7 +1013,9 @@ def splice_audio_ffmpeg(
             subs_path = None
             try:
                 from subs import prepare_subtitles
-                subs_path, sub_hits = prepare_subtitles(audio_path, str(temp_dir))
+                tracks, sub_hits, n_streams = prepare_subtitles(audio_path, str(temp_dir))
+                if len(tracks) == 1 and n_streams == 1:
+                    subs_path = tracks[0]["path"]
                 if subs_path:
                     log(f"[subs] Rewrote {sub_hits} subtitle word(s) with the "
                         f"same euphemisms, replacing the embedded track")
