@@ -115,7 +115,8 @@ def load_model(model_name: str, device: str, compute_type: str = "auto"):
 
 
 def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
-                min_gap: float = 0.7, max_gap: float = 15.0) -> list[dict]:
+                min_gap: float = 0.7, max_gap: float = 15.0,
+                max_spans: int = 60) -> list[dict]:
     """Re-transcribe short silent gaps between words and recover dropped words.
 
     Whisper's VAD drops a word entirely at some chunk boundaries: the word is
@@ -170,7 +171,7 @@ def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
 
     added: list[dict] = []
     checked = 0
-    for g0, g1 in spans[:60]:
+    for g0, g1 in spans[:max_spans]:
         seg = rms[int(g0 / frame):int(g1 / frame)]
         if seg.size == 0 or int((seg > thresh).sum()) < 6:  # <120 ms of sound
             continue
@@ -198,6 +199,8 @@ def rescan_gaps(words: list[dict], audio, model, sr: int = 16000,
             if any(m["start"] < k["end"] - 0.05 and m["end"] > k["start"] + 0.05
                    for k in known):
                 continue
+            if m["end"] <= m["start"]:
+                m["end"] = m["start"] + 0.25
             added.append({"word": m["word"], "start": m["start"], "end": m["end"]})
 
     if added:
@@ -278,6 +281,11 @@ def transcribe_words(model, audio, language: str | None = None,
             token = (w.word or "").strip()
             if not token:
                 continue
+            if end <= start:
+                # faster-whisper occasionally emits start == end; a zero-length
+                # span would make the splicer skip its duration math (see
+                # splice_audio.MIN_REPLACEMENT_MS). Give it a usable window.
+                end = start + 0.25
             words.append({"word": token, "start": float(start),
                           "end": float(end)})
 

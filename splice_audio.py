@@ -48,6 +48,7 @@ import tempfile
 from pathlib import Path
 
 CROSSFADE_MS = 20  # 20ms fade applied at segment boundaries
+MIN_REPLACEMENT_MS = 250  # shortest window a replacement may occupy
 DEFAULT_GAIN_DB = 6.0  # fallback boost when measurement fails (TTS is typically quieter)
 MAX_GAIN_DB = 24.0  # safety clamp to prevent excessive amplification
 MIN_GAIN_DB = -12.0  # safety clamp to prevent excessive attenuation
@@ -577,6 +578,19 @@ def build_censored_audio(
         filename = format_filename(start_ms, end_ms, replacement)
         wav_path = audio_dir / filename
 
+        if end_ms < start_ms + MIN_REPLACEMENT_MS:
+            # faster-whisper occasionally reports a word with start == end. A
+            # zero-length target would skip the duration guards below and dump
+            # the TTS file at its natural length, growing the timeline and
+            # desyncing every later frame. Give the replacement a real span;
+            # the following gap segment shrinks by the same amount, so the
+            # total duration is still exact. (The .wav is still named after
+            # the original span.)
+            log(f"[{i + 1}/{len(sorted_replacements)}] "
+                f"(word span {end_ms - start_ms}ms too short; widened to "
+                f"{MIN_REPLACEMENT_MS}ms)")
+            end_ms = start_ms + MIN_REPLACEMENT_MS
+
         if not wav_path.is_file():
             log(f"[{i + 1}/{len(sorted_replacements)}] "
                 f"[{start_ms:08d}-{end_ms:08d}] "
@@ -730,18 +744,26 @@ def mux_video_audio(
     censored_audio: str,
     output_path: str,
     reencode_video: bool = False,
+    subs_path: str | None = None,
 ) -> bool:
-    """Mux the original video stream (copied losslessly) with the censored audio."""
+    """Mux the original video stream (copied losslessly) with the censored audio.
+
+    When subs_path is given, that rewritten .srt replaces the first subtitle
+    track so the text matches the censored audio.
+    """
     log(f"[mux] Muxing original video + censored audio -> {output_path}")
 
     cmd = [
         "ffmpeg", "-y",
         "-i", original_video,
         "-i", censored_audio,
-        "-map", "0:v:0",     # video from original
-        "-map", "1:a:0",     # audio from censored track
-        "-map", "0:s?",      # keep any embedded subtitle tracks
     ]
+    if subs_path:
+        cmd += ["-i", subs_path]
+        sub_codec = "mov_text" if output_path.lower().endswith(".mp4") else "srt"
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "2:0"]
+    else:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "0:s?"]
 
     if reencode_video:
         log("[mux] Video: RE-ENCODING to H.264 (slower, for compatibility)")
@@ -754,8 +776,12 @@ def mux_video_audio(
     cmd += [
         "-c:a", "aac",
         "-b:a", "192k",
-        "-c:s", "copy",     # subtitles copied, not re-encoded
     ]
+    if subs_path:
+        cmd += ["-c:s", sub_codec]
+        log(f"[mux] Subtitles: rewritten track ({sub_codec})")
+    else:
+        cmd += ["-c:s", "copy"]
 
     # Preserve metadata/subtitles/chapters from the original where possible
     cmd += ["-map_metadata", "0"]
@@ -962,14 +988,45 @@ def splice_audio_ffmpeg(
         if not ok:
             return False
 
+        # The timeline arithmetic is exact, but per-segment ffmpeg trims can
+        # leave the concatenated WAV a few frames off after many replacements.
+        # Force it back to the source length so the audio can never drift
+        # against the untouched video (this is also what the sync check uses).
+        built_dur = get_audio_duration_seconds(censored_audio_wav)
+        if abs(built_dur - source_duration) > 0.02:
+            fixed_wav = str(temp_dir / "censored_audio_exact.wav")
+            log(f"[fix] Censored audio {built_dur:.3f}s vs source "
+                f"{source_duration:.3f}s; trimming/padding to exact length")
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", censored_audio_wav,
+                 "-af", "apad", "-t", f"{source_duration:.6f}",
+                 "-acodec", "pcm_s16le", "-ar", str(sample_rate),
+                 "-ac", str(channels), fixed_wav],
+                capture_output=True,
+            )
+            if Path(fixed_wav).is_file():
+                os.replace(fixed_wav, censored_audio_wav)
+
         # Step 2: Produce final output (mux for video, encode for audio-only)
         if is_video:
             reencode = os.environ.get("VIDEO_REENCODE", "0") == "1"
+            subs_path = None
+            try:
+                from subs import prepare_subtitles
+                subs_path, sub_hits = prepare_subtitles(audio_path, str(temp_dir))
+                if subs_path:
+                    log(f"[subs] Rewrote {sub_hits} subtitle word(s) with the "
+                        f"same euphemisms, replacing the embedded track")
+            except Exception as exc:
+                log(f"[subs] rewrite unavailable ({type(exc).__name__}: {exc}); "
+                    f"copying subtitles unchanged")
+                subs_path = None
             success = mux_video_audio(
                 original_video=audio_path,
                 censored_audio=censored_audio_wav,
                 output_path=output_path,
                 reencode_video=reencode,
+                subs_path=subs_path,
             )
         else:
             success = encode_audio_only(
