@@ -26,6 +26,7 @@ from replacements import REPLACEMENTS, clean_word, _resolve_key
 
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’\-*]*")
 TIME_LINE = "-->"  # SRT cue timestamp separator
+TEXT_CODECS = {"subrip", "srt", "mov_text", "ass", "ssa", "webvtt"}
 
 
 def resolve(tok: str) -> str | None:
@@ -83,19 +84,20 @@ def rewrite_srt(srt: str) -> tuple[str, int]:
 
 
 def subtitle_streams(video: str) -> list[dict]:
-    """Text subtitle streams of a file (index, codec, language)."""
+    """All subtitle streams in order: absolute index, subtitle-relative index,
+    codec, language, and whether the codec is text."""
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "s",
          "-show_entries", "stream=index,codec_name:stream_tags=language",
          "-of", "compact=p=0", video],
         capture_output=True, text=True)
     out = []
-    for line in r.stdout.splitlines():
+    for rel, line in enumerate(r.stdout.splitlines()):
         fields = dict(p.split("=", 1) for p in line.split("|") if "=" in p)
-        if fields.get("codec_name") in ("subrip", "srt", "mov_text", "ass", "ssa", "webvtt"):
-            out.append({"index": int(fields["index"]),
-                        "codec": fields["codec_name"],
-                        "lang": fields.get("tag:language", "")})
+        codec = fields.get("codec_name", "")
+        out.append({"index": int(fields["index"]), "rel": rel, "codec": codec,
+                    "lang": fields.get("tag:language", ""),
+                    "text": codec in TEXT_CODECS})
     return out
 
 
@@ -106,23 +108,36 @@ def extract_srt(video: str, stream_index: int) -> str:
     return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
 
 
-def prepare_subtitles(video: str, workdir: str) -> tuple[str | None, int]:
-    """Return (path to rewritten .srt, hits) or (None, 0) when nothing to do."""
+def prepare_subtitles(video: str, workdir: str) -> tuple[list[dict], int, int]:
+    """Rewrite every English (or und) text subtitle track.
+
+    Returns (tracks, hits, total_subtitle_streams) where each track is
+    {"path": srt, "rel": subtitle-relative index, "lang": language}. Files with
+    bitmap subtitles are left untouched (they cannot round-trip through SRT).
+    """
     import os
 
     streams = subtitle_streams(video)
-    if len(streams) != 1:
-        if streams:
-            print(f"[subs] {os.path.basename(video)}: {len(streams)} subtitle "
-                  f"tracks; leaving them untouched", flush=True)
-        return None, 0
-    srt = extract_srt(video, streams[0]["index"])
-    if not srt.strip():
-        return None, 0
-    new_srt, hits = rewrite_srt(srt)
-    if not hits:
-        return None, 0
-    path = os.path.join(workdir, "censored_subtitles.srt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(new_srt)
-    return path, hits
+    if not streams:
+        return [], 0, 0
+    if not all(s["text"] for s in streams):
+        print(f"[subs] {os.path.basename(video)}: bitmap subtitle track; "
+              f"leaving subtitles untouched", flush=True)
+        return [], 0, len(streams)
+    targets = [s for s in streams if s["lang"] in ("eng", "en", "und")]
+    if not targets and len(streams) == 1:
+        targets = streams
+    tracks, hits = [], 0
+    for s in targets:
+        srt = extract_srt(video, s["index"])
+        if not srt.strip():
+            continue
+        new_srt, h = rewrite_srt(srt)
+        if not h:
+            continue
+        path = os.path.join(workdir, f"censored_subtitles_{s['rel']}.srt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_srt)
+        tracks.append({"path": path, "rel": s["rel"], "lang": s["lang"] or "eng"})
+        hits += h
+    return tracks, hits, len(streams)
