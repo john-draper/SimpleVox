@@ -23,10 +23,12 @@ def main():
     n += check("god's plan", "gosh's plan")
     n += check("What the fuck?", "What the freak?")
     n += check("f***ing hell", "stinking heck")
+    n += check("Christ!", "Sheesh!")
+    n += check("Oh, Christ.", "Oh, Sheesh.")
     n += check("that dumb-ass move", "that idiot move")
     n += check("kick-ass show", "kickbutt show")
     n += check("classic glass", "classic glass")  # no substring matches
-    assert n == 9, f"expected 9 hits, got {n}"
+    assert n == 11, f"expected 11 hits, got {n}"
 
     srt = ("1\n00:00:01,000 --> 00:00:02,000\nDamn it.\n\n"
            "2\n00:00:03,000 --> 00:00:04,000\n<i>Shit.</i>\n")

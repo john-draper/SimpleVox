@@ -196,8 +196,11 @@ REPLACEMENTS: dict[str, str] = {
     "hell": "heck",
 
     # --- Religious exclamations (used as profanity) ---
-    "christ": "cripes",
-    "christs": "cripes",
+    # "cripes" was too close to "Christ": /kraɪps/ vs /kraɪst/ share the kr-
+    # onset and the vowel, so the censored audio still sounded like the
+    # profanity. "sheesh" keeps the exasperated tone with no shared phoneme.
+    "christ": "sheesh",
+    "christs": "sheesh",
     "jesus": "geez",
 
     # --- Bitch / cunt / twat family ---
