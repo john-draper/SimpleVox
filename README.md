@@ -174,7 +174,14 @@ python generate_audio.py output/movie_replacements.json --output-dir output/gene
 
 ### Stage 4: Audio Splice + Video Mux (`splice_audio.py`)
 
-Builds the censored audio track (each replacement trimmed/stretched/loudness-matched to exactly fill the original word's slot), then muxes it with the **original video stream** (copied losslessly).
+Builds the censored audio track. Each replacement is trimmed to the actual TTS
+speech, loudness-matched, then **stretched to the spoken length of the original
+word** (chained `atempo`, down to 0.25x) and placed at that word's onset; the
+window's extra padding is silence. A drawn-out "mother-fuckah!" therefore gets a
+drawn-out euphemism instead of a short "freak" followed by dead air, and the
+euphemism never starts before the word or ends while the word is still being
+spoken. The finished audio is muxed with the **original video stream** (copied
+losslessly).
 
 ```bash
 python splice_audio.py "input/video.mkv" \

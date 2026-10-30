@@ -91,7 +91,12 @@ def generate_wav(text: str, voice: str = DEFAULT_VOICE) -> bytes:
 
     edge-tts returns MP3, so we transcode to WAV via ffmpeg to match the format
     expected by the splice stage.
+
+    Hyphenated per-part replacements ("yumyulack-is-a-crappy-co-replicant")
+    are spoken as separate words: Edge TTS returns NoAudioReceived for some
+    long hyphenated tokens. The filename still uses the original text.
     """
+    speak = text.replace("-", " ").replace("_", " ").strip() or text
     mp3_path = None
     wav_path = None
     try:
@@ -100,7 +105,7 @@ def generate_wav(text: str, voice: str = DEFAULT_VOICE) -> bytes:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_tmp:
             wav_path = wav_tmp.name
 
-        asyncio.run(_synthesize_to_mp3(text, voice, mp3_path))
+        asyncio.run(_synthesize_to_mp3(speak, voice, mp3_path))
 
         result = subprocess.run(
             ["ffmpeg", "-y", "-i", mp3_path,
@@ -149,16 +154,24 @@ def process_replacement(
     filename = format_filename(start, end, replacement)
     output_path = output_dir / filename
 
-    try:
-        log(f"  [generate] '{replacement}' -> {filename}")
-        audio_bytes = generate_wav(text=replacement, voice=voice)
-        save_wav(audio_bytes, output_path)
-        log(f"    [saved] {output_path} ({len(audio_bytes) / 1024:.1f} KB)")
-        return str(output_path)
-    except Exception as exc:
-        exc_name = type(exc).__name__
-        log(f"    [error] {exc_name}: {exc}")
-        return None
+    # Edge TTS occasionally returns "No audio received" on a transient
+    # network hiccup. Retry a few times before failing the whole episode.
+    last_exc = None
+    for attempt in range(3):
+        try:
+            log(f"  [generate] '{replacement}' -> {filename}"
+                + (f" (retry {attempt})" if attempt else ""))
+            audio_bytes = generate_wav(text=replacement, voice=voice)
+            save_wav(audio_bytes, output_path)
+            log(f"    [saved] {output_path} ({len(audio_bytes) / 1024:.1f} KB)")
+            return str(output_path)
+        except Exception as exc:
+            last_exc = exc
+            log(f"    [error] {type(exc).__name__}: {exc}")
+            if attempt < 2:
+                import time
+                time.sleep(1.5 * (attempt + 1))
+    return None
 
 
 # --------------------------------------------------------------------------- #

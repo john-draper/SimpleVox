@@ -67,7 +67,7 @@ def build_replacements(tmp: Path):
     audio_dir.mkdir()
     for k in range(8):
         start = 1.5 + 4.3 * k          # never lands on a click (clicks are every 4.0s)
-        end = start + 0.4
+        end = start + 0.30             # keep the tail-out clear of the 32.0s click
         s_ms, e_ms = int(start * 1000), int(end * 1000)
         name = splice_audio.format_filename(s_ms, e_ms, "freak")
         ns = int(0.45 * 24000)

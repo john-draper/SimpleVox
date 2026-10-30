@@ -174,7 +174,10 @@ def stage1b_second_ear(video: str, words_json: str) -> bool:
     return True
 
 
-def stage2_filter(words_json: str, replacements_json: str) -> tuple[bool, int]:
+def stage2_filter(words_json: str, replacements_json: str,
+                  video: str | None = None,
+                  model_name: str = "large-v3",
+                  device: str | None = None) -> tuple[bool, int]:
     banner("[STAGE 2/4] PROFANITY FILTERING")
     log(f"  Input:   {words_json}")
     log(f"  Output:  {replacements_json}")
@@ -183,6 +186,57 @@ def stage2_filter(words_json: str, replacements_json: str) -> tuple[bool, int]:
         with open(words_json, encoding="utf-8") as f:
             words = json.load(f)
         matches = find_matches(words)
+        if matches and video:
+            from transcribe import decode_audio_16k
+            audio = decode_audio_16k(video)
+            try:
+                from transcribe import load_model
+                # Full-file discovery may use a faster model (medium); the
+                # per-candidate re-listen stays large-v3 for accurate times.
+                rt_model = load_model("medium", device or "cuda")
+            except Exception as exc:
+                rt_model = None
+                log(f"  [model] WARNING: could not reload for re-timing "
+                    f"({type(exc).__name__}: {exc})")
+            # Full-file word times are loose; re-listen to a short clip around
+            # each candidate. A clip-sized pass puts the word where it is
+            # actually spoken (full pass: "Fuck" 715.59-716.99; clip:
+            # 716.30-716.90), which stops the euphemism from playing early.
+            if rt_model is not None:
+                try:
+                    from retime import retime_matches
+                    matches = retime_matches(matches, audio, rt_model)
+                    log(f"  [retime] Re-listened to {len(matches)} candidate(s)")
+                except Exception as exc:
+                    log(f"  [retime] WARNING: skipped ({type(exc).__name__}: {exc})")
+                # The subtitle track lists words Whisper sometimes drops.
+                try:
+                    from oracle import extract_cues, oracle_matches
+                    cues = extract_cues(video)
+                    before = len(matches)
+                    matches = oracle_matches(matches, cues, audio, rt_model)
+                    if len(matches) > before:
+                        log(f"  [oracle] Added {len(matches) - before} "
+                            f"window(s) from {len(cues)} subtitle cues")
+                    elif cues:
+                        log(f"  [oracle] {len(cues)} subtitle cue(s); nothing new")
+                except Exception as exc:
+                    log(f"  [oracle] WARNING: skipped ({type(exc).__name__}: {exc})")
+            # Word timestamps often end a long word early. Grow each censored
+            # window to the word's acoustic end before TTS generation, so the
+            # euphemism fully covers the original instead of leaving its tail
+            # in the following gap ("scoundrel ... fucker").
+            try:
+                from refine import refine_matches
+                before = [(m["start"], m["end"]) for m in matches]
+                matches = refine_matches(matches, words, audio)
+                grown = sum(1 for (a, b), m in zip(before, matches)
+                            if m["end"] - m["start"] > b - a + 0.02)
+                if grown:
+                    log(f"  [refine] Extended {grown} window(s) to the spoken "
+                        f"word end")
+            except Exception as exc:
+                log(f"  [refine] WARNING: skipped ({type(exc).__name__}: {exc})")
     except Exception as exc:
         log(f"[FAILED] Stage 2 error: {type(exc).__name__}: {exc}")
         return False, 0
@@ -341,6 +395,7 @@ def process_file(
     lead_in_ms: int | None = None,
     word_pad_ms: int = 50,
     second_ear: bool = False,
+    words_json_src: str | None = None,
 ) -> bool:
     """Run the full 4-stage pipeline on a single video file.
 
@@ -384,16 +439,26 @@ def process_file(
     log(f"  Stage 4 -> {final_output}")
 
     # --- Stage 1: Transcription ---
-    if not stage1_transcribe(str(video_path), words_json, model, device,
-                             word_pad_ms=word_pad_ms):
-        return False
+    if words_json_src and Path(words_json_src).is_file():
+        # Fast path for re-censoring: reuse an existing (VAD-era) transcript as
+        # the candidate list. retime.py re-listens to every candidate and
+        # oracle.py adds the words it dropped, so the old timings are only a
+        # locator, not the splice point. Saves the full-file ASR pass.
+        shutil.copy2(words_json_src, words_json)
+        log(f"  [words] Reused existing transcript: {words_json_src}")
+    else:
+        if not stage1_transcribe(str(video_path), words_json, model, device,
+                                 word_pad_ms=word_pad_ms):
+            return False
 
-    # --- Stage 1b: optional second ear ---
-    if second_ear:
-        stage1b_second_ear(str(video_path), words_json)
+        # --- Stage 1b: optional second ear ---
+        if second_ear:
+            stage1b_second_ear(str(video_path), words_json)
 
     # --- Stage 2: Profanity filtering ---
-    ok, count = stage2_filter(words_json, replacements_json)
+    ok, count = stage2_filter(words_json, replacements_json,
+                              video=str(video_path), model_name=model,
+                              device=device)
     if not ok:
         return False
 
@@ -466,6 +531,12 @@ def main(argv: list[str] | None = None) -> int:
         "--device",
         default=None,
         help="Device for faster-whisper (cuda/cpu). Default: auto-detect.",
+    )
+    p.add_argument(
+        "--words-json",
+        default=None,
+        help="Reuse an existing transcript JSON as the candidate list instead "
+             "of running the full-file ASR pass (retime/oracle still run).",
     )
     p.add_argument(
         "--word-pad-ms",
@@ -555,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                 lead_in_ms=args.lead_in_ms,
                 word_pad_ms=args.word_pad_ms,
                 second_ear=args.second_ear,
+                words_json_src=args.words_json,
             )
         except Exception as exc:
             log(f"[FAILED] Unexpected error on {video_path}: "

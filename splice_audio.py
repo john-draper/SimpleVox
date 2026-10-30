@@ -98,14 +98,15 @@ WORD_FAMILY_LEAD_IN_MS = {
     # so A/V timing stays exact.
 }
 
-# Trailing frication ("s" at the end of ass/asses/shits) continues PAST the
-# reported word end and bleeds into the gap after the replacement ("buttS").
-# Spectral measurement on AD S01E01 'ass': the /s/ HF ridge (5.5-11kHz) runs
-# from -50ms BEFORE the reported end to +165-170ms AFTER it. So words ending
-# in "s" get a 200ms tail (measured 170ms + margin); other endings get 60ms.
-# Keyed on the word's LAST letter, applied only to the a/s families.
-TAIL_FRICATIVE_MS = 0    # SIMPLE BASELINE: no tail-out padding
-TAIL_OTHER_MS = 0        # SIMPLE BASELINE: no tail-out padding
+# Trailing releases/frication continue past Whisper's reported word end.
+# Leaving these at zero (the old "simple baseline") leaks the end of the
+# profanity into the following gap: "ass" -> "buttS", "fuck" -> "fuckK".
+# Values are intentionally small (they are clamped to the next replacement
+# and to the next word by the splicer) so they cover the release without
+# swallowing whole neighbour words.
+TAIL_FRICATIVE_MS = 120
+TAIL_STOP_MS = 30
+TAIL_OTHER_MS = 20
 
 # Of the lead-in, only this much is pure silence; the replacement itself is
 # stretched to start earlier and fill the rest (user preference: the word
@@ -145,9 +146,18 @@ def get_word_tail_out_ms(word: str) -> int:
     cleaned = word.strip().strip(string.punctuation).lower()
     if not cleaned:
         return 0
-    if cleaned[0] not in ("a", "s"):
-        return 0
-    return TAIL_FRICATIVE_MS if cleaned[-1] == "s" else TAIL_OTHER_MS
+    # Whisper's end timestamp for these often sits at the start of the final
+    # voiced release; measured leakage is up to ~0.35s ("God" -> "gosh god").
+    if cleaned in ("god", "god's"):
+        return 350
+    if cleaned in ("jesus", "jesus's"):
+        return 250
+    last = cleaned[-1]
+    if last in "s z x" or cleaned.endswith(("sh", "ch", "th", "f")):
+        return TAIL_FRICATIVE_MS
+    if last in "k g t d p b":
+        return TAIL_STOP_MS
+    return TAIL_OTHER_MS
 
 
 def lead_in_desc() -> str:
@@ -450,68 +460,103 @@ def convert_replacement_wav(
 ) -> None:
     """Convert a replacement WAV to match the original audio's format and duration.
 
-    Trims leading/trailing silence, applies loudness gain, time-stretches to the
-    target duration (keeping A/V sync), applies fades, and pads/trims to exact
-    length.
+    Trims leading/trailing silence (Edge TTS pads ~2.5 s of silence), applies
+    loudness gain, time-stretches the actual speech to the target duration
+    (keeping A/V sync), centres the euphemism inside its window, applies fades,
+    and pads/trims to exact length.
     """
-    try:
-        duration = get_audio_duration_seconds(input_wav)
-    except RuntimeError:
-        duration = 1.0  # fallback
+    layout = "stereo" if channels == 2 else "mono"
 
-    parts = [
-        f"aformat=sample_rates={sample_rate}:"
-        f"channel_layouts={'stereo' if channels == 2 else 'mono'}"
+    # Pass 1: measure the SPOKEN word, not the padded TTS file. The old
+    # `duration - 0.9` guess overestimated short clips, so a 0.5 s slot could
+    # be sped up 3-4x and the euphemism ended as an unintelligible chirp.
+    trimmed_wav = str(
+        Path(output_wav).with_name(Path(output_wav).stem + "_trim.wav")
+    )
+    trim_filter = ",".join([
+        f"aformat=sample_rates={sample_rate}:channel_layouts={layout}",
+        "silenceremove=start_periods=1:start_silence=0.01:"
+        "start_threshold=-45dB:detection=peak",
+        "areverse",
+        "silenceremove=start_periods=1:start_silence=0.01:"
+        "start_threshold=-45dB:detection=peak",
+        "areverse",
+    ])
+    cmd = [
+        "ffmpeg", "-y", "-i", input_wav, "-af", trim_filter,
+        "-acodec", "pcm_s16le", "-ar", str(sample_rate),
+        "-ac", str(channels), trimmed_wav,
     ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, result.stdout, result.stderr
+        )
 
-    # Trim leading AND trailing silence so only the spoken word remains.
-    parts.append(
-        "silenceremove=start_periods=1:start_silence=0.01:"
-        "start_threshold=-45dB:detection=peak"
-    )
-    parts.append("areverse")
-    parts.append(
-        "silenceremove=start_periods=1:start_silence=0.01:"
-        "start_threshold=-45dB:detection=peak"
-    )
-    parts.append("areverse")
+    try:
+        speech_duration = get_audio_duration_seconds(trimmed_wav)
+    except RuntimeError:
+        speech_duration = 1.0
 
-    # Loudness gain (applied to the raw TTS signal).
+    parts = [f"aformat=sample_rates={sample_rate}:channel_layouts={layout}"]
+
     if abs(gain_db) > 0.01:
         parts.append(f"volume={gain_db:+.2f}dB")
 
-    # Time-stretch the SPEECH to fill the target duration (keeps A/V sync).
-    if target_duration_s is not None and target_duration_s > 0.02 and duration > 0.02:
-        estimated_speech = max(0.1, duration - 0.9)
-        speed_factor = estimated_speech / target_duration_s
-        if speed_factor > 1.05:
-            remaining = speed_factor
+    # Time-stretch the ACTUAL speech to the target duration (keeps A/V sync).
+    factor = 1.0
+    if (target_duration_s is not None and target_duration_s > 0.02
+            and speech_duration > 0.02):
+        factor = speech_duration / target_duration_s
+        if factor > 1.05:
+            remaining = factor
             while remaining > 2.0:
                 parts.append("atempo=2.0")
                 remaining /= 2.0
             parts.append(f"atempo={remaining:.4f}")
-        elif speed_factor < 0.95:
-            parts.append(f"atempo={max(0.5, speed_factor):.4f}")
+        elif factor < 0.95:
+            # Stretch the euphemism to the spoken length of the word instead
+            # of cutting it short and padding with silence. atempo only goes
+            # down to 0.5 per stage, so chain stages (0.5 x 0.5 = 0.25). Do
+            # not go below 0.25x; at that point the remainder is padded.
+            factor = max(0.25, factor)
+            remaining = factor
+            while remaining < 0.5:
+                parts.append("atempo=0.5")
+                remaining /= 0.5
+            parts.append(f"atempo={remaining:.4f}")
 
-    effective_dur = target_duration_s if target_duration_s else duration
+    stretched = speech_duration / factor
+    delay = 0.0
+    if target_duration_s is not None and target_duration_s > stretched:
+        # Centre the euphemism in its window. Wide windows (a drawn-out
+        # "mother-fuckah!") no longer start speaking at the window's left edge.
+        delay = (target_duration_s - stretched) / 2.0
+        if delay > 0.005:
+            parts.append(f"adelay=delays={int(delay * 1000)}:all=1")
+
+    effective_dur = target_duration_s if target_duration_s else stretched
     fade_dur = min(fade_ms / 1000, effective_dur / 4) if effective_dur > 0.02 else 0
-    fade_out_start = max(0, effective_dur - fade_dur)
     if fade_dur > 0:
-        parts.append(f"afade=t=in:st=0:d={fade_dur:.6f}")
-        parts.append(f"afade=t=out:st={fade_out_start:.6f}:d={fade_dur:.6f}")
+        parts.append(f"afade=t=in:st={delay:.6f}:d={fade_dur:.6f}")
+        parts.append(f"afade=t=out:st={delay + max(0.0, stretched - fade_dur):.6f}:"
+                     f"d={fade_dur:.6f}")
 
-    # Pad to exact duration.
     if target_duration_s is not None and target_duration_s > 0:
         parts.append(f"apad=whole_dur={target_duration_s:.6f}")
 
     afilter = ",".join(parts)
 
-    cmd = ["ffmpeg", "-y", "-i", input_wav, "-af", afilter]
+    cmd = ["ffmpeg", "-y", "-i", trimmed_wav, "-af", afilter]
     if target_duration_s is not None and target_duration_s > 0:
         cmd += ["-t", f"{target_duration_s:.6f}"]
     cmd += ["-acodec", "pcm_s16le", "-ar", str(sample_rate),
             "-ac", str(channels), output_wav]
     result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        os.remove(trimmed_wav)
+    except OSError:
+        pass
     if result.returncode != 0:
         raise subprocess.CalledProcessError(
             result.returncode, cmd, result.stdout, result.stderr
@@ -605,6 +650,11 @@ def build_censored_audio(
         # replacement itself is stretched to start earlier and fill the rest,
         # then run past the reported end to swallow trailing frication.
         word_lead_in = lead_in_ms if lead_in_ms is not None else get_word_lead_in_ms(word)
+        if entry.get("lead_in") is not None:
+            # Per-window lead-in from the acoustic refiner: the window was
+            # widened left to cover a leaked onset, so keep the euphemism at
+            # the reported word start instead of speaking it at the new edge.
+            word_lead_in = max(0, int(float(entry["lead_in"]) * 1000))
         word_tail = get_word_tail_out_ms(word)
         pad_start_ms = max(prev_end_ms, start_ms - word_lead_in)
         actual_lead_in_ms = start_ms - pad_start_ms
@@ -633,51 +683,94 @@ def build_censored_audio(
                 skipped_count += 1
                 continue
 
-        # --- Silence guard before the replacement -----------------------------
-        # Only LEAD_IN_SILENCE_GUARD_MS of the lead-in is silence; the rest is
-        # filled by the replacement starting early (see below).
-        silence_ms = min(actual_lead_in_ms, LEAD_IN_SILENCE_GUARD_MS)
-        if silence_ms > 0:
-            silence_path = str(temp_dir / f"silence_{i:04d}.wav")
-            try:
-                generate_silence(
-                    silence_ms, silence_path, sample_rate, channels
-                )
-                segment_files.append(silence_path)
-            except subprocess.CalledProcessError as exc:
-                log(f"  ERROR generating silence lead-in: "
-                    f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
-                # non-fatal: the onset may leak, but keep the replacement
+        # --- Replacement region ------------------------------------------------
+        # The window is [start - lead_in, end + tail_out], clamped to the
+        # neighbours. When the refiner recorded the pre-widening spoken span,
+        # the euphemism is placed exactly there (with silence filling the
+        # window's padding). That is what stops it from speaking before the
+        # word or ending before the word does. Entries without that metadata
+        # fall back to the old lead-in/fill behaviour.
+        ss_ms = se_ms = None
+        if entry.get("speech_start") is not None and entry.get("speech_end") is not None:
+            ss_ms = int(float(entry["speech_start"]) * 1000)
+            se_ms = int(float(entry["speech_end"]) * 1000)
+            ss_ms = max(pad_start_ms, min(ss_ms, eff_end_ms - 80))
+            se_ms = max(ss_ms + 80, min(se_ms, eff_end_ms))
 
-        # --- Convert and add the replacement audio -----------------------------
-        # Target duration spans [start - (lead-in - guard), end + tail-out]:
-        # the word comes in earlier and lasts longer, keeping A/V sync because
-        # the concat timeline is unchanged.
-        rep_start_ms = start_ms - (actual_lead_in_ms - silence_ms)
-        target_dur = (eff_end_ms - rep_start_ms) / 1000.0
         gain_db = compute_loudness_gain_db(
             original_audio=audio_path,
             replacement_wav=str(wav_path),
-            start_s=start_ms / 1000.0,
-            end_s=end_ms / 1000.0,
+            start_s=(ss_ms if ss_ms is not None else start_ms) / 1000.0,
+            end_s=(se_ms if se_ms is not None else end_ms) / 1000.0,
         )
         converted_rep_path = str(temp_dir / f"rep_{i:04d}.wav")
-        try:
-            convert_replacement_wav(
-                str(wav_path), converted_rep_path,
-                sample_rate, channels, crossfade_ms,
-                target_duration_s=target_dur,
-                gain_db=gain_db,
-            )
-            segment_files.append(converted_rep_path)
-            success_count += 1
+
+        if ss_ms is not None:
+            lead_ms = ss_ms - pad_start_ms
+            trail_ms = eff_end_ms - se_ms
+            if lead_ms > 0:
+                try:
+                    sp = str(temp_dir / f"lead_{i:04d}.wav")
+                    generate_silence(lead_ms, sp, sample_rate, channels)
+                    segment_files.append(sp)
+                except subprocess.CalledProcessError as exc:
+                    log(f"  ERROR generating lead-in silence: {exc}")
+            try:
+                convert_replacement_wav(
+                    str(wav_path), converted_rep_path,
+                    sample_rate, channels, crossfade_ms,
+                    target_duration_s=(se_ms - ss_ms) / 1000.0,
+                    gain_db=gain_db,
+                )
+                segment_files.append(converted_rep_path)
+                success_count += 1
+            except subprocess.CalledProcessError as exc:
+                log(f"  ERROR converting replacement: "
+                    f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
+                skipped_count += 1
+            if trail_ms > 0:
+                try:
+                    sp = str(temp_dir / f"trail_{i:04d}.wav")
+                    generate_silence(trail_ms, sp, sample_rate, channels)
+                    segment_files.append(sp)
+                except subprocess.CalledProcessError as exc:
+                    log(f"  ERROR generating tail silence: {exc}")
             log(f"[{i + 1}/{len(sorted_replacements)}] "
                 f"[{start_ms:08d}-{end_ms:08d}] "
-                f"({word:>12} -> {replacement:>12}) OK")
-        except subprocess.CalledProcessError as exc:
-            log(f"  ERROR converting replacement: "
-                f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
-            skipped_count += 1
+                f"({word:>12} -> {replacement:>12}) OK "
+                f"(speech {ss_ms}-{se_ms}ms)")
+        else:
+            # Legacy path: 60 ms of the lead-in is silence, the rest is filled
+            # by the replacement starting early.
+            silence_ms = min(actual_lead_in_ms, LEAD_IN_SILENCE_GUARD_MS)
+            if silence_ms > 0:
+                silence_path = str(temp_dir / f"silence_{i:04d}.wav")
+                try:
+                    generate_silence(
+                        silence_ms, silence_path, sample_rate, channels
+                    )
+                    segment_files.append(silence_path)
+                except subprocess.CalledProcessError as exc:
+                    log(f"  ERROR generating silence lead-in: "
+                        f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
+            rep_start_ms = start_ms - (actual_lead_in_ms - silence_ms)
+            target_dur = (eff_end_ms - rep_start_ms) / 1000.0
+            try:
+                convert_replacement_wav(
+                    str(wav_path), converted_rep_path,
+                    sample_rate, channels, crossfade_ms,
+                    target_duration_s=target_dur,
+                    gain_db=gain_db,
+                )
+                segment_files.append(converted_rep_path)
+                success_count += 1
+                log(f"[{i + 1}/{len(sorted_replacements)}] "
+                    f"[{start_ms:08d}-{end_ms:08d}] "
+                    f"({word:>12} -> {replacement:>12}) OK")
+            except subprocess.CalledProcessError as exc:
+                log(f"  ERROR converting replacement: "
+                    f"{exc.stderr[:200] if exc.stderr else 'unknown'}")
+                skipped_count += 1
 
         prev_end_ms = eff_end_ms
 

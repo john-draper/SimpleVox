@@ -257,7 +257,15 @@ def pad_words(words: list[dict], pad_ms: int) -> list[dict]:
 def transcribe_words(model, audio, language: str | None = None,
                      vad: bool = True,
                      initial_prompt: str | None = None) -> tuple[list[dict], str]:
-    """Run one faster-whisper pass and return (words, detected_language)."""
+    """Run one faster-whisper pass and return (words, detected_language).
+
+    VAD is used for the full-file pass to keep long music/silence stretches
+    from turning into repetition loops (a no-VAD pass stalled for minutes on
+    a Solar Opposites credit sequence). Its word timestamps are NOT trusted:
+    `retime.py` re-listens to a short clip around every profanity candidate
+    and replaces the time, and `oracle.py` recovers words the VAD pass drops
+    using the subtitle track.
+    """
     t0 = time.time()
     log(f"[transcribe] Running faster-whisper (VAD {'on' if vad else 'off'})...")
     segments, info = model.transcribe(
@@ -306,6 +314,7 @@ def transcribe_audio(
     output_path: str | None,
     word_pad_ms: int = DEFAULT_WORD_PAD_MS,
     model=None,
+    vad: bool = True,
 ) -> list[dict]:
     """Transcribe audio and return a list of word dicts with timestamps.
 
@@ -331,7 +340,7 @@ def transcribe_audio(
     log(f"[audio] Decoded in {time.time() - t0:.1f}s "
         f"({audio.shape[0] / 16000 / 60:.1f} min of audio)")
 
-    words, _lang = transcribe_words(model, audio, language=language)
+    words, _lang = transcribe_words(model, audio, language=language, vad=vad)
 
     # Recover words dropped at VAD boundaries (whole-word misses).
     words = rescan_gaps(words, audio, model)
