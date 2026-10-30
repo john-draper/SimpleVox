@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+import _nowindow  # noqa: F401  (no console windows for child processes)
 
 # The single generic male voice used for every replacement word.
 # Microsoft Edge neural TTS voice "Guy" (en-US) — a neutral, quality male voice.

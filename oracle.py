@@ -27,6 +27,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+import _nowindow  # noqa: F401  (no console windows for child processes)
 
 import numpy as np
 

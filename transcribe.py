@@ -37,6 +37,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import _nowindow  # noqa: F401  (no console windows for child processes)
 
 # Default model. `small` (244M) is fast but misses profanity; `large-v3`
 # catches materially more and still runs comfortably on a modern GPU.

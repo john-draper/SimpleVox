@@ -175,13 +175,17 @@ python generate_audio.py output/movie_replacements.json --output-dir output/gene
 ### Stage 4: Audio Splice + Video Mux (`splice_audio.py`)
 
 Builds the censored audio track. Each replacement is trimmed to the actual TTS
-speech, loudness-matched, then **stretched to the spoken length of the original
-word** (chained `atempo`, down to 0.25x) and placed at that word's onset; the
-window's extra padding is silence. A drawn-out "mother-fuckah!" therefore gets a
-drawn-out euphemism instead of a short "freak" followed by dead air, and the
-euphemism never starts before the word or ends while the word is still being
-spoken. The finished audio is muxed with the **original video stream** (copied
-losslessly).
+speech, loudness-matched, then **time-stretched to fill the spoken length of the
+original word** at that word's onset; the window's extra padding is silence. A
+drawn-out "mother-fuckah!" therefore gets a drawn-out euphemism instead of a
+short "freak" followed by dead air, and the euphemism never starts before the
+word or ends while the word is still being spoken.
+
+The stretch is **pitch preserving**: ffmpeg's `rubberband` filter (with
+`formant=preserved`) changes duration only, so a word squeezed into a 150 ms
+slot does not turn into a chipmunk and one stretched into a 1 s slot does not
+turn into a demon. `atempo` is the fallback if `rubberband` is unavailable. The
+finished audio is muxed with the **original video stream** (copied losslessly).
 
 ```bash
 python splice_audio.py "input/video.mkv" \
@@ -231,6 +235,7 @@ Pass any of these with `--voice`.
 ## Troubleshooting
 
 - **Audio out of sync** — SimpleVox cut segments straight from the compressed source, which lost one codec frame (~21 ms) per run and compounded when a censored file was re-spliced. It now cuts from a decoded PCM copy and every run prints `[sync] OK ... (delta +0ms)`; if that line warns instead, the file needs re-splicing rather than a timing tweak. Older outputs that were censored repeatedly may still carry a small constant lead.
+- **Black console windows flash during a run** — a hidden parent (`pythonw`, a scheduled task, a watcher) gives every ffmpeg child its own console window. `_nowindow` (imported by `run.py`/`splice_audio.py`) patches `subprocess.Popen` with `CREATE_NO_WINDOW` and a hidden startup window, so the whole pipeline runs without flashing windows. It is a no-op off Windows.
 - **CUDA crashes / cuDNN errors** — Install cuDNN 8 DLLs (`pip install nvidia-cudnn-cu11==8.9.4.25`) and copy them to your `torch/lib/` folder. Or fall back to CPU with `--device cpu`.
 - **FFmpeg not found** — `winget install Gyan.FFmpeg`, then reopen your terminal.
 - **edge-tts returns tiny/empty audio** — This is usually a transient network issue; rerun. The stage skips already-generated files with `--skip-existing`.
@@ -240,12 +245,15 @@ Pass any of these with `--voice`.
 ```bash
 python test_replacements.py     # profanity dictionary + matcher regressions
 python tests/test_sync.py       # A/V sync: repeated re-splices must stay at 0ms
+python tests/test_pitch.py      # euphemism stretch keeps pitch (150 Hz in -> 150 Hz out)
 ```
 
 `tests/test_sync.py` builds a synthetic clip with sharp clicks, censors it,
 then re-splices the output several times (as happens across censor passes) and
 asserts every click kept its original timestamp. Run it after any change to
-`splice_audio.py`.
+`splice_audio.py`. `tests/test_pitch.py` stretches a pure tone to 0.5x/0.67x/1.5x
+its length and asserts the frequency does not move; run it after any change to
+`convert_replacement_wav()`.
 
 ## License
 

@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import _nowindow  # noqa: F401  (no console windows for child processes)
 
 import numpy as np
 

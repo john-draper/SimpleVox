@@ -45,7 +45,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
+
+import _nowindow  # noqa: F401  (no console windows for ffmpeg children)
 
 CROSSFADE_MS = 20  # 20ms fade applied at segment boundaries
 MIN_REPLACEMENT_MS = 250  # shortest window a replacement may occupy
@@ -345,6 +348,37 @@ def compute_loudness_gain_db(
 ) -> float:
     """Compute the gain (dB) so the replacement matches the original loudness."""
     orig_dur = end_s - start_s
+
+    # Fast path: read PCM WAVs with numpy instead of spawning ffmpeg twice per
+    # replacement (150+ processes per episode; this was the splice bottleneck).
+    if original_audio.lower().endswith(".wav") and replacement_wav.lower().endswith(".wav"):
+        try:
+            import wave
+
+            import numpy as np
+
+            def rms_db(path, start=None, dur=None):
+                with wave.open(path, "rb") as w:
+                    if w.getsampwidth() != 2:
+                        raise ValueError("not 16-bit")
+                    sr = w.getframerate()
+                    if start is not None:
+                        w.setpos(max(0, int(start * sr)))
+                        raw = w.readframes(max(1, int(dur * sr)))
+                    else:
+                        raw = w.readframes(w.getnframes())
+                arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                return 20 * np.log10(max(float(np.sqrt((arr ** 2).mean())), 1e-6))
+
+            orig_mean = rms_db(original_audio, start_s, orig_dur)
+            rep_mean = rms_db(replacement_wav)
+            gain = max(MIN_GAIN_DB, min(MAX_GAIN_DB, orig_mean - rep_mean))
+            log(f"    [loudness] original={orig_mean:+.1f}dB "
+                f"replacement={rep_mean:+.1f}dB -> gain={gain:+.1f}dB")
+            return gain
+        except Exception:
+            pass
+
     orig_mean = measure_segment_mean_volume_db(original_audio, start_s, orig_dur)
     rep_mean = measure_file_mean_volume_db(replacement_wav)
 
@@ -374,6 +408,19 @@ def format_filename(start_ms: int, end_ms: int, replacement: str) -> str:
 # ffmpeg segment operations
 # --------------------------------------------------------------------------- #
 
+def _write_pcm_wav(path: str, arr, sample_rate: int, channels: int) -> None:
+    """Write an int16 numpy array as a PCM WAV (fast, no ffmpeg process)."""
+    import wave
+
+    import numpy as np
+
+    with wave.open(path, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(np.ascontiguousarray(arr, dtype=np.int16).tobytes())
+
+
 def extract_segment(
     audio_path: str,
     start_ms: int,
@@ -383,10 +430,40 @@ def extract_segment(
     channels: int,
     fade_ms: int = CROSSFADE_MS,
 ) -> None:
-    """Extract a segment [start_ms, end_ms] from the source file as PCM WAV."""
+    """Extract a segment [start_ms, end_ms] from the source file as PCM WAV.
+
+    When the source is already the decoded PCM WAV (the normal splice path),
+    slice it with numpy. The old per-gap ffmpeg process (seek + decode a
+    250 MB WAV) took seconds per segment and dominated long episodes; numpy
+    slicing is sample-exact and milliseconds.
+    """
+    import numpy as np
+
     duration_ms = end_ms - start_ms
     if duration_ms <= 0:
         raise ValueError(f"Invalid segment duration: {duration_ms}ms")
+
+    if audio_path.lower().endswith(".wav"):
+        try:
+            import wave
+
+            with wave.open(audio_path, "rb") as w:
+                if (w.getframerate() == sample_rate
+                        and w.getnchannels() == channels
+                        and w.getsampwidth() == 2):
+                    data = w.readframes(w.getnframes())
+                    arr = np.frombuffer(data, dtype=np.int16).reshape(-1, channels)
+                    a = int(start_ms * sample_rate / 1000)
+                    b = int(end_ms * sample_rate / 1000)
+                    seg = arr[a:b].copy()
+                    if fade_ms > 0 and len(seg) > fade_ms * 2:
+                        f = int(fade_ms * sample_rate / 1000)
+                        ramp = np.linspace(1.0, 0.0, f, dtype=np.float32)[:, None]
+                        seg[-f:] = (seg[-f:].astype(np.float32) * ramp).astype(np.int16)
+                    _write_pcm_wav(output_path, seg, sample_rate, channels)
+                    return
+        except Exception:
+            pass  # fall through to ffmpeg
 
     fade_out_start = max(0, (duration_ms - fade_ms) / 1000)
 
@@ -431,6 +508,18 @@ def generate_silence(
     """
     if duration_ms <= 0:
         raise ValueError(f"Invalid silence duration: {duration_ms}ms")
+    # Fast path: write zeros directly instead of spawning ffmpeg per silence
+    # segment (there can be 100+ per episode).
+    try:
+        import numpy as np
+
+        n = int(round(duration_ms * sample_rate / 1000))
+        _write_pcm_wav(output_path,
+                       np.zeros((n, channels), dtype=np.int16),
+                       sample_rate, channels)
+        return
+    except Exception:
+        pass
     layout = "stereo" if channels == 2 else "mono"
     cmd = [
         "ffmpeg", "-y",
@@ -449,6 +538,97 @@ def generate_silence(
         )
 
 
+def _pitch_preserving_fit(mono, sample_rate: int, target_n: int,
+                          scratch_dir) -> "object":
+    """Fit ``mono`` to exactly ``target_n`` samples WITHOUT changing pitch.
+
+    ffmpeg's rubberband filter is a WSOLA-style time stretcher: it changes
+    duration while keeping the fundamental frequency and (with
+    ``formant=preserved``) the vocal-tract resonances. Plain resampling --
+    the old ``np.interp`` here -- changes both, which is why sped-up
+    euphemisms sounded like chipmunks and slowed ones sounded like a demon.
+
+    Falls back to chained ``atempo`` (also pitch preserving) and only then to
+    the old linear interpolation, so a missing filter never desyncs a file.
+    """
+    import wave
+
+    import numpy as np
+
+    n = int(mono.size)
+    target_n = int(target_n)
+    if target_n <= 0 or n <= 0:
+        return mono
+
+    # Under 0.5% is a trim/pad, not a stretch: a resample this small is
+    # inaudible and spawning ffmpeg 100+ times for nothing is wasteful.
+    if abs(target_n - n) <= max(2, int(round(0.005 * n))):
+        if n >= target_n:
+            return mono[:target_n]
+        return np.pad(mono, (0, target_n - n))
+
+    tempo = n / float(target_n)
+    tempo = min(max(tempo, 0.05), 50.0)  # rubberband accepts 0.01..100
+
+    scratch = Path(scratch_dir)
+    src = str(scratch / "fit_in.wav")
+    dst = str(scratch / "fit_out.wav")
+    pcm = (np.clip(mono, -1.0, 1.0) * 32767.0).astype(np.int16)
+    _write_pcm_wav(src, pcm.reshape(-1, 1), sample_rate, 1)
+
+    def _run(afilter: str) -> bool:
+        if os.path.exists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+        cmd = [
+            "ffmpeg", "-y", "-nostdin", "-v", "error",
+            "-i", src, "-af", afilter,
+            "-acodec", "pcm_s16le", "-ar", str(sample_rate),
+            "-ac", "1", dst,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0 and Path(dst).is_file()
+
+    ok = _run(
+        f"rubberband=tempo={tempo:.6f}:pitch=1.0:formant=preserved:"
+        f"pitchq=quality:channels=together"
+    )
+    if not ok:
+        parts = [f"aformat=sample_rates={sample_rate}:channel_layouts=mono"]
+        remaining = tempo
+        while remaining > 2.0:
+            parts.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < 0.5:
+            parts.append("atempo=0.5")
+            remaining /= 0.5
+        parts.append(f"atempo={remaining:.6f}")
+        ok = _run(",".join(parts))
+
+    out = None
+    if ok:
+        try:
+            with wave.open(dst, "rb") as w:
+                if w.getsampwidth() == 2:
+                    out = (np.frombuffer(w.readframes(w.getnframes()),
+                                         dtype=np.int16)
+                           .astype(np.float32) / 32768.0)
+        except Exception:
+            out = None
+
+    if out is None:
+        # Last resort: the old length-changing resample. Sync still wins over
+        # pitch, and this path only runs if ffmpeg itself is broken.
+        return np.interp(np.linspace(0, 1, target_n),
+                         np.linspace(0, 1, n), mono).astype(np.float32)
+
+    if out.size >= target_n:
+        return out[:target_n]
+    return np.pad(out, (0, target_n - out.size))
+
+
 def convert_replacement_wav(
     input_wav: str,
     output_wav: str,
@@ -465,15 +645,84 @@ def convert_replacement_wav(
     (keeping A/V sync), centres the euphemism inside its window, applies fades,
     and pads/trims to exact length.
     """
+    # Fast path for 16-bit PCM TTS. Trim, gain, fades and padding are pure
+    # numpy; only the length-changing stretch needs a process, and that one
+    # is pitch preserving (rubberband). Never resample here: resampling a TTS
+    # clip to fit a shorter slot raises its pitch (and the reverse lowers it).
+    try:
+        import wave
+
+        import numpy as np
+
+        with wave.open(input_wav, "rb") as w:
+            if w.getsampwidth() == 2:
+                sr0, ch0 = w.getframerate(), w.getnchannels()
+                raw = w.readframes(w.getnframes())
+                arr = (np.frombuffer(raw, dtype=np.int16)
+                       .reshape(-1, ch0).astype(np.float32) / 32768.0)
+                mono = arr.mean(axis=1) if ch0 > 1 else arr[:, 0]
+                loud = np.where(np.abs(mono) > 10 ** (-45 / 20))[0]
+                if loud.size:
+                    mono = mono[loud[0]:loud[-1] + 1]
+                if mono.size and sr0 != sample_rate:
+                    n = max(1, int(round(mono.size * sample_rate / sr0)))
+                    mono = np.interp(np.linspace(0, 1, n),
+                                     np.linspace(0, 1, mono.size), mono)
+                target_s = (target_duration_s if target_duration_s
+                            else mono.size / sample_rate)
+                target_n = max(1, int(round(target_s * sample_rate)))
+                if mono.size and mono.size != target_n:
+                    mono = _pitch_preserving_fit(
+                        mono, sample_rate, target_n, Path(output_wav).parent
+                    )
+                if abs(gain_db) > 0.01:
+                    mono = mono * (10 ** (gain_db / 20.0))
+                f = int(fade_ms * sample_rate / 1000)
+                if f > 0 and mono.size > 2 * f:
+                    mono[:f] *= np.linspace(0, 1, f)
+                    mono[-f:] *= np.linspace(1, 0, f)
+                if mono.size < target_n:
+                    mono = np.pad(mono, (0, target_n - mono.size))
+                else:
+                    mono = mono[:target_n]
+                out = np.repeat(mono[:, None], channels, axis=1)
+                _write_pcm_wav(output_wav,
+                               (np.clip(out, -1, 1) * 32767).astype(np.int16),
+                               sample_rate, channels)
+                return
+    except Exception:
+        pass
+
     layout = "stereo" if channels == 2 else "mono"
 
-    # Pass 1: measure the SPOKEN word, not the padded TTS file. The old
-    # `duration - 0.9` guess overestimated short clips, so a 0.5 s slot could
-    # be sped up 3-4x and the euphemism ended as an unintelligible chirp.
-    trimmed_wav = str(
-        Path(output_wav).with_name(Path(output_wav).stem + "_trim.wav")
-    )
-    trim_filter = ",".join([
+    # Measure the SPOKEN word directly from the TTS WAV (no ffmpeg pass). Edge
+    # TTS pads ~2.5 s of silence; the old `duration - 0.9` guess sped short
+    # slots up 3-4x. One ffmpeg call now does trim + gain + stretch + pads.
+    try:
+        import wave
+
+        import numpy as np
+
+        with wave.open(input_wav, "rb") as w:
+            sr0, ch0, sw0 = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            raw = w.readframes(w.getnframes())
+        if sw0 == 2:
+            arr = np.frombuffer(raw, dtype=np.int16).reshape(-1, ch0)
+            mono = np.abs(arr.astype(np.float32)).mean(axis=1)
+            loud = np.where(mono > 32768 * 10 ** (-45 / 20))[0]
+            if loud.size:
+                speech_duration = (loud[-1] - loud[0] + 1) / sr0
+            else:
+                speech_duration = 0.0
+        else:
+            speech_duration = get_audio_duration_seconds(input_wav)
+    except Exception:
+        try:
+            speech_duration = get_audio_duration_seconds(input_wav)
+        except RuntimeError:
+            speech_duration = 1.0
+
+    parts = [
         f"aformat=sample_rates={sample_rate}:channel_layouts={layout}",
         "silenceremove=start_periods=1:start_silence=0.01:"
         "start_threshold=-45dB:detection=peak",
@@ -481,24 +730,7 @@ def convert_replacement_wav(
         "silenceremove=start_periods=1:start_silence=0.01:"
         "start_threshold=-45dB:detection=peak",
         "areverse",
-    ])
-    cmd = [
-        "ffmpeg", "-y", "-i", input_wav, "-af", trim_filter,
-        "-acodec", "pcm_s16le", "-ar", str(sample_rate),
-        "-ac", str(channels), trimmed_wav,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode, cmd, result.stdout, result.stderr
-        )
-
-    try:
-        speech_duration = get_audio_duration_seconds(trimmed_wav)
-    except RuntimeError:
-        speech_duration = 1.0
-
-    parts = [f"aformat=sample_rates={sample_rate}:channel_layouts={layout}"]
 
     if abs(gain_db) > 0.01:
         parts.append(f"volume={gain_db:+.2f}dB")
@@ -547,16 +779,12 @@ def convert_replacement_wav(
 
     afilter = ",".join(parts)
 
-    cmd = ["ffmpeg", "-y", "-i", trimmed_wav, "-af", afilter]
+    cmd = ["ffmpeg", "-y", "-i", input_wav, "-af", afilter]
     if target_duration_s is not None and target_duration_s > 0:
         cmd += ["-t", f"{target_duration_s:.6f}"]
     cmd += ["-acodec", "pcm_s16le", "-ar", str(sample_rate),
             "-ac", str(channels), output_wav]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    try:
-        os.remove(trimmed_wav)
-    except OSError:
-        pass
     if result.returncode != 0:
         raise subprocess.CalledProcessError(
             result.returncode, cmd, result.stdout, result.stderr
@@ -1049,7 +1277,15 @@ def splice_audio_ffmpeg(
     else:
         log(f"[audio] Lead-in pad: {lead_in_desc()}")
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="splice_"))
+    # NOTE: tempfile.mkdtemp() creates a 0700 directory. On Windows that DACL
+    # can leave child ffmpeg processes unable to write into it under a
+    # restricted token/sandbox (observed here: "Permission denied" on the PCM
+    # decode, then WinError 5 on cleanup). Create the directory normally so it
+    # inherits the parent's DACL. SIMPLEVOX_TMP lets a caller point scratch
+    # files at a fast disk.
+    scratch_root = os.environ.get("SIMPLEVOX_TMP") or tempfile.gettempdir()
+    temp_dir = Path(scratch_root) / f"splice_{uuid.uuid4().hex}"
+    temp_dir.mkdir(parents=True, exist_ok=False)
     try:
         censored_audio_wav = str(temp_dir / "censored_audio.wav")
 

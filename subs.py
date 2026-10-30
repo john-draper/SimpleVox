@@ -21,6 +21,7 @@ Design notes:
 import re
 import string
 import subprocess
+import _nowindow  # noqa: F401  (no console windows for child processes)
 
 from replacements import REPLACEMENTS, clean_word, _resolve_key
 
