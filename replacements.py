@@ -280,8 +280,8 @@ REPLACEMENTS: dict[str, str] = {
     # ("cocksucker" is a separate entry below/above and is still censored.)
 
     # --- Whore / slut ---
-    "whore": "hussy",
-    "whores": "hussies",
+    # "whore"/"whores" (-> hussy/hussies) REMOVED 2026-11-04 at the owner's
+    # request: the family is deliberately NOT censored. Do not re-add.
     # "slut"/"sluts"/"slutty" REMOVED 2026-10-07 at the owner's request:
     # slut-family words are deliberately NOT censored. Do not re-add them
     # (also covers the hyphen per-part fallback - "X-slut" stays unmatched).

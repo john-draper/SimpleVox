@@ -68,6 +68,9 @@ NO_MATCH_CASES = [
     "douche",
     "douchebags.",
     "douche-canoe",
+    # whore family removed 2026-11-04 (owner request)
+    "whore",
+    "whores.",
 ]
 
 
