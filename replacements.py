@@ -238,11 +238,10 @@ REPLACEMENTS: dict[str, str] = {
     "dipshit": "dipstick",
 
     # --- Douche family ---
-    "douche": "jerk",
-    "douches": "jerks",
-    "douchebag": "ninny",
-    "douchebags": "ninnies",
-    "douche-canoe": "ninny",
+    # "douche"/"douches"/"douchebag"/"douchebags"/"douche-canoe" REMOVED
+    # 2026-11-04 at the owner's request: the whole douche family is
+    # deliberately NOT censored. Do not re-add it (the hyphen per-part
+    # fallback stays silent too, since no part key exists any more).
 
     # --- Bastard family ---
     "bastard": "rascal",

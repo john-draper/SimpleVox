@@ -64,6 +64,10 @@ NO_MATCH_CASES = [
     "cock",
     "cocks.",
     "cock-blocked",     # no per-part fallback without the "cock" key
+    # douche family removed 2026-11-04 (owner request)
+    "douche",
+    "douchebags.",
+    "douche-canoe",
 ]
 
 
