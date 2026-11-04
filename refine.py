@@ -114,6 +114,13 @@ def refine_matches(
         prev_word_end = 0.0
         for s, e in word_spans:
             if s <= start - 0.02 and e <= start + 0.06:
+                # Never treat the censored word itself as "the preceding word".
+                # When the local re-listen moved the onset later than the
+                # full-file span, that span ends *inside* our window; counting
+                # it made start_floor == the word's own end, so the window
+                # began after the profanity and the word stayed audible.
+                if e > start + 0.02 and s < end:
+                    continue
                 prev_word_end = max(prev_word_end, e)
         nxt_word_start = total_s
         for s, e in word_spans:

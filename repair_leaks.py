@@ -130,7 +130,7 @@ def main(argv=None) -> int:
     ap.add_argument("--voice", default="en-US-GuyNeural")
     args = ap.parse_args(argv)
 
-    model = load_model("medium", "cuda")
+    model = load_model("large-v3", "cuda")
     raw = decode_pcm(args.raw)
     audio = decode_audio_16k(args.raw)
     cues = extract_cues(args.raw)

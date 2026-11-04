@@ -72,24 +72,40 @@ def retime_matches(matches: list[dict], audio: np.ndarray, model,
     for m in matches:
         mid = (float(m["start"]) + float(m["end"])) / 2.0
         t0, t1, words = local_words_for(mid)
+        # Pick the profane token that OVERLAPS the candidate, not merely the
+        # nearest one. A nearest-word search within 1.6 s jumped onto a
+        # different occurrence of the same word ("shit!" at 1265.84 retimed to
+        # a "shit" 1.5 s earlier) and the real word then had no window at all.
+        c_start, c_end = float(m["start"]), float(m["end"])
+        c_dur = max(0.05, c_end - c_start)
         best = None
-        best_dist = 1.6
+        best_score = 0.0
         orig_key = clean_word(str(m.get("word", "")))
         for w in words:
             key = clean_word(w["word"])
             if key not in REPLACEMENTS and not (
                     key.endswith("'s") and key[:-2] in REPLACEMENTS):
                 continue
-            dist = abs((w["start"] + w["end"]) / 2.0 - mid)
-            if dist < best_dist:
-                best, best_dist = w, dist
-        if best is not None and best["end"] > best["start"]:
+            overlap = min(c_end, float(w["end"])) - max(c_start, float(w["start"]))
+            if overlap <= 0.0:
+                continue
+            score = overlap / c_dur
+            if score > best_score:
+                best, best_score = w, score
+        if best is not None and best_score >= 0.40 and best["end"] > best["start"]:
             b_start = float(best["start"])
             b_end = float(best["end"])
             # A clip pass can occasionally over-extend (e.g. merge two words).
             # Keep it under 1.6 s; the acoustic refiner trims/extends from the
-            # waveform afterwards.
+            # waveform afterwards. A token far longer than the word can be said
+            # is a merge ("I... OH SHIT" came back as one 1.76 s "shit,"), so
+            # trust the full-file position instead of the merged span.
+            from refine import expected_ms
+            exp = expected_ms(best["word"]) / 1000.0
             cap = 1.60
+            if b_end - b_start > min(cap, exp * 1.8 + 0.30):
+                out.append(dict(m))
+                continue
             if b_end - b_start > cap:
                 b_end = b_start + cap
             out.append({**m,
@@ -98,4 +114,15 @@ def retime_matches(matches: list[dict], audio: np.ndarray, model,
                         "word": best["word"]})
         else:
             out.append(dict(m))
-    return out
+
+    # Two candidates can collapse onto the same local token; keep one window so
+    # the splicer does not speak the euphemism twice in place.
+    out.sort(key=lambda x: float(x["start"]))
+    dedup: list[dict] = []
+    for m in out:
+        if (dedup and m["replacement"] == dedup[-1]["replacement"]
+                and abs(float(m["start"]) - float(dedup[-1]["start"])) < 0.05
+                and abs(float(m["end"]) - float(dedup[-1]["end"])) < 0.05):
+            continue
+        dedup.append(m)
+    return dedup

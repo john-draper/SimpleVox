@@ -158,6 +158,18 @@ Matches transcribed words against the replacement dictionary in `replacements.py
 
 Edit the `REPLACEMENTS` dictionary in `replacements.py` to customize.
 
+#### Word-timing refinement (inside stage 2)
+
+A full-file transcript is good at *finding* a profane word and bad at saying
+exactly where it starts and ends. Three passes turn the candidate into a splice
+window that covers the whole word and nothing else:
+
+| Module | What it does |
+|---|---|
+| `retime.py` | Re-listens to a ~4 s clip around each candidate with **large-v3** (the same model as the full pass; `medium` runs ~0.4 s late on real dialogue and moved windows onto the *next* word). It picks the profane token that **overlaps** the candidate — never merely the nearest, which could jump 1.5 s to a different occurrence — and rejects clip tokens far longer than the word can be (a merged "I… OH SHIT"). |
+| `oracle.py` | Re-listens to every subtitle cue that contains a dictionary word and adds the occurrences Whisper deleted (the human subtitle track still lists them). |
+| `refine.py` | Grows the window to the word's acoustic end (until 250 ms of quiet) and at most 150 ms left, never past the preceding word and never across the next replacement. The euphemism is stretched over the measured spoken span, so it stops when the word stops. |
+
 ### Stage 3: Audio Generation (`generate_audio.py`)
 
 Generates replacement `.wav` files with the **single generic male voice** (`en-US-GuyNeural` by default). All words use the same voice.

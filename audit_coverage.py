@@ -136,7 +136,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     from transcribe import load_model
-    model = load_model("medium", "cuda")
+    model = load_model("large-v3", "cuda")
     audio = decode_audio_16k(args.raw)
     windows = json.load(open(args.replacements, encoding="utf-8"))
     words = json.load(open(args.words, encoding="utf-8"))

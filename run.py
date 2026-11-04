@@ -192,9 +192,11 @@ def stage2_filter(words_json: str, replacements_json: str,
             audio = decode_audio_16k(video)
             try:
                 from transcribe import load_model
-                # Full-file discovery may use a faster model (medium); the
-                # per-candidate re-listen stays large-v3 for accurate times.
-                rt_model = load_model("medium", device or "cuda")
+                # The clip re-listen MUST use the same model as the full pass.
+                # medium is ~0.35-0.4 s late on real dialogue ("Jesus" heard at
+                # 386.20 instead of 385.86), which moved windows off the word
+                # and left it audible; large-v3 puts it back on the word.
+                rt_model = load_model("large-v3", device or "cuda")
             except Exception as exc:
                 rt_model = None
                 log(f"  [model] WARNING: could not reload for re-timing "
