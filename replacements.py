@@ -275,8 +275,10 @@ REPLACEMENTS: dict[str, str] = {
     "retarded": "ridiculous",
 
     # --- Cock family ---
-    "cock": "willy",
-    "cocks": "willies",
+    # "cock"/"cocks" REMOVED 2026-11-04 at the owner's request: the word is
+    # deliberately NOT censored. Do not re-add it — this also covers the
+    # hyphen per-part fallback, so "cock-blocked" stays unmatched too.
+    # ("cocksucker" is a separate entry below/above and is still censored.)
 
     # --- Whore / slut ---
     "whore": "hussy",

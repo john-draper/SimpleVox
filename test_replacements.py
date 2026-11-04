@@ -60,6 +60,10 @@ NO_MATCH_CASES = [
     "f-ing",            # softened "eff-ing"
     "self-aware",       # clean hyphenated compounds
     "",
+    # cock family removed from the dictionary 2026-11-04 (owner request)
+    "cock",
+    "cocks.",
+    "cock-blocked",     # no per-part fallback without the "cock" key
 ]
 
 
