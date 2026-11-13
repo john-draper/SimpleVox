@@ -233,7 +233,8 @@ REPLACEMENTS: dict[str, str] = {
 
     # --- Misc from the filter ---
     "bleep": "beep",
-    "fags": "gays",
+    # "fags" REMOVED 2026-11-13 at the owner's request: anti-gay slurs are
+    # deliberately NOT censored. Do not re-add.
     "fuchs": "craps",
     "dipshit": "dipstick",
 
